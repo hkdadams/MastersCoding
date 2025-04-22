@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3-Slider Platform - Forces & Weights (v12 - Torque Fix)</title>
+    <style>
+        /* CSS updated for better force display */
+        body { margin: 0; font-family: sans-serif; overflow: hidden; }
+        #container { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+        #canvas-container { flex-grow: 1; position: relative; background-color: #f0f0f0; }
+        #controls-container { display: flex; flex-direction: column; padding: 5px 10px; background-color: #ddd; border-top: 1px solid #bbb; max-height: 45vh; overflow-y: auto;}
+        .controls-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        #mode-toggle, #force-toggle { padding: 5px 10px; font-weight: bold; cursor: pointer; align-self: flex-start;}
+        #fk-warning { color: #8B0000; font-size: 0.85em; margin: 5px 0; display: none; }
+        #controls-grid { display: grid; grid-template-columns: auto 1fr auto; gap: 3px 10px; align-items: center; font-size: 0.85em; }
+        label { justify-self: end; grid-column: 1; white-space: nowrap; }
+        input[type="range"] { width: 100%; grid-column: 2; margin: 1px 0; box-sizing: border-box; cursor: pointer; height: 18px;}
+        .value-display { grid-column: 3; font-family: monospace; white-space: nowrap; padding-left: 5px;}
+        .output-value { font-weight: bold; color: #006400; }
+        .force-output { font-weight: bold; color: #00008B; display: none; } /* Hidden by default */
+        .force-label { display: none; } /* Hide force labels by default */
+        .show-forces .force-output, .show-forces .force-label { display: inline; } /* Show when parent has class */
+        .input-disabled { opacity: 0.5; pointer-events: none; cursor: default !important; }
+        label.input-disabled { opacity: 0.5; }
+        #status { position: absolute; top: 10px; left: 10px; background-color: rgba(255, 255, 255, 0.8); padding: 8px; border-radius: 5px; color: red; font-weight: bold; font-size: 1.0em; border: 1px solid transparent; z-index: 10; display: none; max-width: 300px; }
+        #status.error { display: block; border-color: red; background-color: rgba(255, 200, 200, 0.9); }
+        #status.warning { display: block; border-color: orange; background-color: rgba(255, 230, 180, 0.9); color: #cc8400; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="canvas-container"><div id="status"></div></div>
+        <div id="controls-container">
+            <div class="controls-row">
+                <button id="mode-toggle">Switch to FK</button>
+                <button id="force-toggle">Show Forces</button>
+            </div>
+             <div id="fk-warning"><b>FK Mode Limitation:</b> Platform orientation (R) fixed at 0. Only Position (P0/T_eff) is accurate. Visual leg lengths may appear incorrect.</div>
+            <div id="controls-grid"><!-- Controls --></div>
+        </div>
+    </div>
+
+    <!-- Load Three.js library -->
+    <script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Parameters & Constants ---
+        let RAIL_MAX_TRAVEL = 0.5; let RAIL_VISUAL_LENGTH = 0.6; let LEG_LENGTH = 0.5;
+        const PLATFORM_SIDE = 0.1; const PLATFORM_RADIUS = PLATFORM_SIDE / Math.sqrt(3); const SLIDER_RADIUS = 0.02;
+        const DEG_TO_RAD = Math.PI / 180; const RAD_TO_DEG = 180 / Math.PI;
+        const CONSTRAINT_TOLERANCE = 1e-4; let L_squared = LEG_LENGTH * LEG_LENGTH;
+        const G = 9.81; const FORCE_ARROW_SCALE = 0.05;
+
+        // --- Geometry ---
+        const baseVectors = [0, 120*DEG_TO_RAD, 240*DEG_TO_RAD].map(a => new THREE.Vector3(Math.cos(a), Math.sin(a), 0));
+        const platformAttachmentPointsLocal = [ /* Vertex attachments */
+            new THREE.Vector3(PLATFORM_RADIUS*Math.cos(0*DEG_TO_RAD), PLATFORM_RADIUS*Math.sin(0*DEG_TO_RAD), 0),
+            new THREE.Vector3(PLATFORM_RADIUS*Math.cos(120*DEG_TO_RAD), PLATFORM_RADIUS*Math.sin(120*DEG_TO_RAD), 0),
+            new THREE.Vector3(PLATFORM_RADIUS*Math.cos(240*DEG_TO_RAD), PLATFORM_RADIUS*Math.sin(240*DEG_TO_RAD), 0) ];
+        const platformVerticesLocal = platformAttachmentPointsLocal;
+
+        // --- Config & State ---
+        // Defaults for IK Target P0=[0.4,0,0.3], R=I => s0=0.0, angle=143.1, s1=0.322, s2=0.322
+        const PARAM_CONFIG = [
+             // Geometry parameters (always enabled)
+             { id: 'LEG_LENGTH', label: 'Leg Length', unit: 'm', min: 0.3, max: 0.8, step: 0.01, value: 0.5, decimals: 3, isGeometry: true, alwaysEnabled: true },
+             { id: 'RAIL_MAX_TRAVEL', label: 'Rail Max Travel', unit: 'm', min: 0.3, max: 0.8, step: 0.01, value: 0.5, decimals: 3, isGeometry: true, alwaysEnabled: true },
+             { id: 'RAIL_VISUAL_LENGTH', label: 'Rail Visual Length', unit: 'm', min: 0.4, max: 1.0, step: 0.01, value: 0.6, decimals: 3, isGeometry: true, alwaysEnabled: true },
+             // Mass parameters
+             { id: 'platform_mass', label: 'Platform Mass', unit: 'kg', min: 0, max: 7.0, step: 0.05, value: 0.65, decimals: 2, isMass: true }, // USER VALUE
+             { id: 'leg_mass', label: 'Leg Mass (each)', unit: 'kg', min: 0, max: 1.5, step: 0.01, value: 0.10, decimals: 2, isMass: true },      // USER VALUE
+             // IK Target P0
+             { id: 'tx', label: 'Target P0 X', unit: 'm', min: -0.1, max: RAIL_MAX_TRAVEL+0.1, step: 0.01, value: 0.120, decimals: 3, isIKInput: true }, // USER VALUE
+             { id: 'ty', label: 'Target P0 Y', unit: 'm', min: -0.05, max: 0.05, step: 0.001, value: 0.0, decimals: 4, isIKInput: true, isWarning: true },     // USER VALUE
+             { id: 'tz', label: 'Target P0 Z', unit: 'm', min: 0.01, max: LEG_LENGTH-0.01, step: 0.01, value: 0.420, decimals: 3, isIKInput: true }, // USER VALUE
+             { id: 'roll', label: 'Roll', unit: 'deg', min: -45, max: 45, step: 1, value: 0.0, decimals: 1, isIKInput: true },                    // USER VALUE
+             { id: 'pitch', label: 'Pitch', unit: 'deg', min: -80, max: 80, step: 1, value: 0.0, decimals: 1, isIKInput: true },                   // USER VALUE
+             { id: 'yaw', label: 'Yaw', unit: 'deg', min: -180, max: 180, step: 1, value: 10.0, decimals: 1, isIKInput: true },                   // USER VALUE
+             { id: 's0', label: 'Slider 1 (X)', unit: 'm', min: 0, max: RAIL_MAX_TRAVEL, step: 0.01, value: 0.391, decimals: 3, isIKInput: false }, // Recalculated
+             { id: 'motorAngleDeg', label: 'Motor Ang(L1)', unit: 'deg', min: 1, max: 179, step: 1, value: 122.9, decimals: 1, isIKInput: false },// Recalculated
+             { id: 's1', label: 'Slider 2', unit: 'm', min: 0, max: RAIL_MAX_TRAVEL, step: 0.01, value: 0.281, decimals: 3, isIKInput: false }, // Recalculated
+             { id: 's2', label: 'Slider 3', unit: 'm', min: 0, max: RAIL_MAX_TRAVEL, step: 0.01, value: 0.315, decimals: 3, isIKInput: false }, // Recalculated
+             // Force outputs
+             { id: 'T0', label: 'Leg 1 Force', unit: 'N', decimals: 1, isForce: true }, { id: 'T1', label: 'Leg 2 Force', unit: 'N', decimals: 1, isForce: true }, { id: 'T2', label: 'Leg 3 Force', unit: 'N', decimals: 1, isForce: true },
+             { id: 'Fs0', label: 'Slider 1 Force', unit: 'N', decimals: 1, isForce: true }, { id: 'Fs1', label: 'Slider 2 Force', unit: 'N', decimals: 1, isForce: true }, { id: 'Fs2', label: 'Slider 3 Force', unit: 'N', decimals: 1, isForce: true },
+             { id: 'tau_motor', label: 'Motor Torque', unit: 'Nm', decimals: 2, isForce: true },
+         ];
+        let currentMode = 'IK'; let currentState = {}; PARAM_CONFIG.forEach(item => { currentState[item.id] = item.value ?? NaN; }); let isMechanismValid = true; let showForces = false;
+
+        // --- DOM Elements, Three.js Setup, Robot Geometry --- (Mostly Same) ---
+        const canvasContainer = document.getElementById('canvas-container'); const statusDiv = document.getElementById('status'); const modeToggleButton = document.getElementById('mode-toggle'); const controlsGrid = document.getElementById('controls-grid'); const controlsContainer = document.getElementById('controls-container'); const fkWarningDiv = document.getElementById('fk-warning'); const forceToggleButton = document.getElementById('force-toggle');
+        const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf0f0f0); const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 10); camera.position.set(0.6, -0.8, 0.7); camera.up.set(0, 0, 1); const renderer = new THREE.WebGLRenderer({ antialias: true }); canvasContainer.appendChild(renderer.domElement); const controls3d = new OrbitControls(camera, renderer.domElement); controls3d.target.set(0, 0, 0.2); controls3d.enableDamping = true;
+        scene.add(new THREE.AmbientLight(0x404040, 2)); const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5); directionalLight.position.set(1, 1, 2); scene.add(directionalLight); const gridHelper = new THREE.GridHelper(1.2, 12); gridHelper.rotation.x = Math.PI / 2; scene.add(gridHelper);
+        const railMaterial = new THREE.LineBasicMaterial({ color: 0x000000 }); const legMaterial = new THREE.LineBasicMaterial({ color: 0x0000ff }); const platformMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 }); const sliderColorValid = 0x0000ff; const sliderColorInvalid = 0xff0000; const sliderMaterial = new THREE.MeshStandardMaterial({ color: sliderColorValid, roughness: 0.5 }); const sliderGeometry = new THREE.SphereGeometry(SLIDER_RADIUS, 16, 8); const railLines = [], legLines = [], platformSegments = [], sliderMeshes = []; const platformVertexIndices = [[0, 1], [1, 2], [2, 0]]; const legForceArrows = [], sliderForceArrows = []; const forceArrowColorTension = 0x0000FF; const forceArrowColorCompression = 0xFF0000; const sliderForceArrowColor = 0x008000;
+        for (let i = 0; i < 3; i++) { railLines.push(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), baseVectors[i].clone().multiplyScalar(RAIL_VISUAL_LENGTH)]), railMaterial)); scene.add(railLines[i]); sliderMeshes.push(new THREE.Mesh(sliderGeometry, sliderMaterial.clone())); scene.add(sliderMeshes[i]); legLines.push(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), legMaterial)); scene.add(legLines[i]); if (i < platformVertexIndices.length) { platformSegments.push(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), platformMaterial)); scene.add(platformSegments[i]); } legForceArrows.push(new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(), 0, forceArrowColorTension, 0.03, 0.015)); scene.add(legForceArrows[i]); legForceArrows[i].visible = false; sliderForceArrows.push(new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(), 0, sliderForceArrowColor, 0.04, 0.02)); scene.add(sliderForceArrows[i]); sliderForceArrows[i].visible = false; }
+        const tempQuat = new THREE.Quaternion(); const tempPos = new THREE.Vector3(); const tempMatrix = new THREE.Matrix4(); const tempEuler = new THREE.Euler(0,0,0,'ZYX'); const tempVecP0Local = platformAttachmentPointsLocal[0].clone(); const tempV1 = new THREE.Vector3(); const tempV2 = new THREE.Vector3(); const tempM3 = new THREE.Matrix3();
+
+        // --- IK & FK Functions ---
+        function calculateIK(inputs) {
+             const { tx, ty, tz, roll, pitch, yaw, L_squared, RMT } = inputs; 
+             const outputs = { s0: NaN, s1: NaN, s2: NaN, motorAngleDeg: NaN }; 
+             let isReachable = true; 
+             let failureReason = "";
+             const CT = CONSTRAINT_TOLERANCE;
+             const P0_target = new THREE.Vector3(tx, ty, tz);
+             const legLength = Math.sqrt(L_squared);
+
+             if (Math.abs(P0_target.y) > CT) { 
+                 isReachable = false; 
+                 failureReason = `Target P0 Y (${ty.toFixed(4)}) must be 0.`; 
+             } 
+             if (isReachable && P0_target.z < CT) { 
+                 isReachable = false; 
+                 failureReason = `Target P0 Z (${tz.toFixed(3)}) must be positive.`; 
+             } 
+             if (isReachable && P0_target.z > legLength - CT) { 
+                 isReachable = false; 
+                 failureReason = `Target P0 Z (${tz.toFixed(3)}) >= Leg length (${legLength}).`; 
+             }
+             tempEuler.set(roll*DEG_TO_RAD, pitch*DEG_TO_RAD, yaw*DEG_TO_RAD, 'ZYX'); tempQuat.setFromEuler(tempEuler); tempMatrix.makeRotationFromQuaternion(tempQuat);
+             const R_x_P0Local = tempVecP0Local.clone().applyMatrix4(tempMatrix); const T_eff = P0_target.clone().sub(R_x_P0Local);
+             const platformAttachPointsWorld = platformAttachmentPointsLocal.map(pLocal => pLocal.clone().applyMatrix4(tempMatrix).add(T_eff)); const P0_world_calc = platformAttachPointsWorld[0];
+             if (isReachable) { const dx_sq_component = L_squared - P0_world_calc.z**2; if (dx_sq_component < CT) { isReachable = false; failureReason = `Leg 1 requires non-zero horizontal component (P0_Z=${P0_world_calc.z.toFixed(3)}).`; } else { const dx_component_abs = Math.sqrt(dx_sq_component); const dx_for_angle = -dx_component_abs; outputs.s0 = P0_world_calc.x - dx_for_angle; outputs.motorAngleDeg = Math.atan2(P0_world_calc.z, dx_for_angle) * RAD_TO_DEG; if (outputs.motorAngleDeg < CT || outputs.motorAngleDeg > 180-CT) { if (!failureReason) failureReason = `Warning: Leg 1 angle (${outputs.motorAngleDeg.toFixed(1)} deg) near horizontal limit.`; } if (outputs.s0 < -CT || outputs.s0 > RMT + CT) { isReachable = false; failureReason = `Slider 1 (${outputs.s0.toFixed(3)}m) out of range.`; } } }
+             for (let i = 1; i < 3; i++) { if (!isReachable) { outputs[`s${i}`] = NaN; continue; }; const Pi_B = platformAttachPointsWorld[i]; const ui = baseVectors[i]; const Pi_B_dot_ui = Pi_B.dot(ui); const Pi_B_dot_Pi_B = Pi_B.lengthSq(); const discriminant = Pi_B_dot_ui * Pi_B_dot_ui - (Pi_B_dot_Pi_B - L_squared); if (discriminant < -CT) { isReachable = false; failureReason = `Leg ${i+1} unreachable (disc < 0).`; outputs[`s${i}`] = NaN; } else { const s_i = Pi_B_dot_ui + Math.sqrt(Math.max(0, discriminant)); outputs[`s${i}`] = s_i; if (s_i < -CT || s_i > RMT + CT) { isReachable = false; failureReason = `Slider ${i+1} (${s_i.toFixed(3)}m) out of range.`; } } }
+             if (Object.values(outputs).some(isNaN) && isReachable) { isReachable = false; failureReason = "Calculation resulted in NaN."; } outputs._T_eff = T_eff; return { outputs, isReachable, failureReason };
+         }
+        function calculateFK(inputs) {
+             const { s0, s1, s2, motorAngleDeg, L_squared, RMT } = inputs; 
+             const outputs = { tx: NaN, ty: 0, tz: NaN, roll: 0, pitch: 0, yaw: 0, _P0_world: null }; 
+             let isReachable = true; 
+             let failureReason = "";
+             const CT = CONSTRAINT_TOLERANCE;
+             const legLength = Math.sqrt(L_squared);
+
+             if (s0 < -CT || s0 > RMT+CT || s1 < -CT || s1 > RMT+CT || s2 < -CT || s2 > RMT+CT) { 
+                 failureReason = "Input slider(s) out of typical range."; 
+             } 
+             if (motorAngleDeg < 1 || motorAngleDeg > 179) { 
+                 if (failureReason) failureReason += " "; 
+                 failureReason += "Input motor angle out of typical range."; 
+             }
+
+             const motorAngleRad = motorAngleDeg * DEG_TO_RAD; 
+             const leg0_dx_comp = legLength * Math.cos(motorAngleRad); 
+             const leg0_dz_comp = legLength * Math.sin(motorAngleRad); 
+             const P0_world = new THREE.Vector3(s0 + leg0_dx_comp, 0, leg0_dz_comp); 
+             outputs._P0_world = P0_world;
+
+             if(P0_world.z < CT) { 
+                 isReachable = false; 
+                 failureReason = `P0 Z (${P0_world.z.toFixed(3)}) must be positive.`; 
+             } 
+             if(isReachable && P0_world.z > legLength - CT) { 
+                 isReachable = false; 
+                 failureReason = `P0 Z (${P0_world.z.toFixed(3)}) >= Leg Length.`; 
+             }
+             const T_eff = P0_world.clone().sub(tempVecP0Local); outputs.tx = T_eff.x; outputs.ty = T_eff.y; outputs.tz = T_eff.z;
+             if (isReachable) { const B1 = baseVectors[1].clone().multiplyScalar(s1); const B2 = baseVectors[2].clone().multiplyScalar(s2); const T = T_eff; const dist_T_B1 = T.distanceTo(B1); const dist_T_B2 = T.distanceTo(B2); const L_plus_R = LEG_LENGTH + PLATFORM_RADIUS + CT; const L_minus_R = Math.max(0, LEG_LENGTH - PLATFORM_RADIUS - CT); 
+             if (dist_T_B1 > L_plus_R || dist_T_B1 < L_minus_R) { isReachable = false; if(failureReason) failureReason += " "; failureReason = `Leg 2 config. likely impossible (T_eff-B1 dist).`; } 
+             if (isReachable && (dist_T_B2 > L_plus_R || dist_T_B2 < L_minus_R)) { isReachable = false; if(failureReason) failureReason += " "; failureReason = `Leg 3 config. likely impossible (T_eff-B2 dist).`; } }
+             if (isReachable && !failureReason) { failureReason = "Orientation (R) estimated as 0.";} return { outputs, isReachable, failureReason };
+        }
+
+        // --- Static Force Calculation ---
+        function calculateStaticForces(T_eff, platformAttachPointsWorld, basePoints, current_platform_mass, current_leg_mass) {
+             const forces = { T0: NaN, T1: NaN, T2: NaN, Fs0: NaN, Fs1: NaN, Fs2: NaN, tau_motor: NaN };
+             const CT = CONSTRAINT_TOLERANCE;
+             if (!T_eff || !isMechanismValid || isNaN(T_eff.x) || platformAttachPointsWorld.length !== 3 || basePoints.length !== 3) return forces;
+
+             const legVectors = [ 
+                 tempV1.subVectors(platformAttachPointsWorld[0], basePoints[0]),
+                 tempV2.subVectors(platformAttachPointsWorld[1], basePoints[1]),
+                 new THREE.Vector3().subVectors(platformAttachPointsWorld[2], basePoints[2])
+             ];
+             const lengthsOK = legVectors.every(v => Math.abs(v.length() - LEG_LENGTH) < 0.01);
+             if (!lengthsOK) { return forces; }
+             const legUnitVectors = legVectors.map(v => v.normalize());
+
+             const total_mass = current_platform_mass + 3 * current_leg_mass;
+             const Fg_total = new THREE.Vector3(0, 0, -total_mass * G);
+
+             tempM3.set(
+                 legUnitVectors[0].x, legUnitVectors[1].x, legUnitVectors[2].x,
+                 legUnitVectors[0].y, legUnitVectors[1].y, legUnitVectors[2].y,
+                 legUnitVectors[0].z, legUnitVectors[1].z, legUnitVectors[2].z
+             );
+             try {
+                const M_inv = tempM3.clone().invert();
+                const negFg = Fg_total.clone().negate();
+                const T_vec = negFg.applyMatrix3(M_inv);
+                forces.T0 = T_vec.x;
+                forces.T1 = T_vec.y;
+                forces.T2 = T_vec.z;
+                
+                for (let i = 0; i < 3; i++) {
+                    forces[`Fs${i}`] = -forces[`T${i}`] * legUnitVectors[i].dot(baseVectors[i]);
+                }
+
+                // Revised Motor Torque Calculation
+                const P0_world = platformAttachPointsWorld[0];
+                const B0 = basePoints[0];
+                const leg0_dx = P0_world.x - B0.x;
+                const leg0_dz = P0_world.z - B0.z;
+                const T0_vert_comp = forces.T0 * legUnitVectors[0].z;
+                const M_vert_load = leg0_dx * T0_vert_comp;
+                const M_leg0_gravity = (leg0_dx / 2) * (-current_leg_mass * G);
+                forces.tau_motor = -(M_vert_load + M_leg0_gravity);
+
+             } catch (e) { console.error("Force calculation failed (Matrix inversion):", e); }
+             return forces;
+        }
+
+
+        // --- UI Update ---
+        function createControls() {
+            controlsGrid.innerHTML = ''; const isIK = currentMode === 'IK';
+            PARAM_CONFIG.forEach(item => {
+                const isInput = item.alwaysEnabled || item.isMass || (isIK ? item.isIKInput : !item.isIKInput);
+                const initialValue = currentState[item.id];
+                const label = document.createElement('label');
+                label.htmlFor = item.id;
+                if (isIK && ['tx','ty','tz'].includes(item.id)) {
+                    label.textContent = item.label.replace('Target', 'Target P0') + ':';
+                } else if (!isIK && ['tx','ty','tz'].includes(item.id)) {
+                    label.textContent = 'Platform Ctr ' + item.label.split(' ').pop() + ':';
+                } else {
+                    label.textContent = item.label + ':';
+                }
+                if (item.isForce) { label.classList.add('force-label'); }
+                const input = document.createElement('input');
+                input.type = 'range';
+                input.id = item.id;
+                input.min = item.min;
+                input.max = item.max;
+                input.step = item.step;
+                input.value = initialValue;
+                input.addEventListener('input', handleInputChange);
+                const valueDisplay = document.createElement('span');
+                valueDisplay.id = `${item.id}-value`;
+                valueDisplay.classList.add('value-display');
+                valueDisplay.textContent = (isNaN(initialValue)) ? 'N/A' : `${Number(initialValue).toFixed(item.decimals)} ${item.unit}`;
+                controlsGrid.appendChild(label);
+                controlsGrid.appendChild(input);
+                controlsGrid.appendChild(valueDisplay);
+                if (item.isForce) {
+                    input.style.display = 'none';
+                    valueDisplay.classList.add('force-output');
+                } else if (!isInput && !item.isMass && !item.alwaysEnabled) {
+                    input.classList.add('input-disabled');
+                    label.classList.add('input-disabled');
+                    valueDisplay.classList.add('output-value');
+                }
+            });
+            update();
+        }
+        function handleInputChange(event) { 
+            const id = event.target.id; 
+            currentState[id] = parseFloat(event.target.value); 
+            
+            // Update geometry parameters if changed
+            if (id === 'LEG_LENGTH') {
+                LEG_LENGTH = currentState.LEG_LENGTH;
+                L_squared = LEG_LENGTH * LEG_LENGTH;
+                // Update dependent parameters
+                PARAM_CONFIG.find(p => p.id === 'tz').max = LEG_LENGTH - 0.01;
+            } else if (id === 'RAIL_MAX_TRAVEL') {
+                RAIL_MAX_TRAVEL = currentState.RAIL_MAX_TRAVEL;
+                // Update dependent parameters
+                PARAM_CONFIG.forEach(p => {
+                    if (['s0', 's1', 's2'].includes(p.id)) {
+                        p.max = RAIL_MAX_TRAVEL;
+                    }
+                    if (p.id === 'tx') {
+                        p.max = RAIL_MAX_TRAVEL + 0.1;
+                    }
+                });
+            } else if (id === 'RAIL_VISUAL_LENGTH') {
+                RAIL_VISUAL_LENGTH = currentState.RAIL_VISUAL_LENGTH;
+            }
+            update(); 
+        }
+
+        // --- Main Update Function ---
+        function update() {
+            let result; let kinematicOutputs = {}; let T_eff; let forceOutputs = {};
+
+            // Add L_squared and RMT to currentState for kinematics calculations
+            const kinematicInputs = {
+                ...currentState,
+                L_squared: L_squared,
+                RMT: RAIL_MAX_TRAVEL
+            };
+
+            // 1. Kinematics
+            if (currentMode === 'IK') { 
+                result = calculateIK(kinematicInputs); 
+                kinematicOutputs = result.outputs; 
+                T_eff = kinematicOutputs._T_eff; 
+                delete kinematicOutputs._T_eff; 
+            } else { 
+                result = calculateFK(kinematicInputs); 
+                kinematicOutputs = result.outputs; 
+                T_eff = new THREE.Vector3(kinematicOutputs.tx, kinematicOutputs.ty, kinematicOutputs.tz); 
+                delete kinematicOutputs._P0_world; 
+                delete kinematicOutputs._T_eff; 
+            }
+            Object.assign(currentState, kinematicOutputs); 
+            isMechanismValid = result.isReachable;
+
+            // Update rail visualization
+            railLines.forEach((line, i) => {
+                line.geometry.setFromPoints([
+                    new THREE.Vector3(),
+                    baseVectors[i].clone().multiplyScalar(RAIL_VISUAL_LENGTH)
+                ]);
+            });
+
+            // 2. Forces
+            let platformAttachPointsWorld = []; let basePoints = [];
+            if (isMechanismValid && T_eff && !isNaN(T_eff.x)) {
+                tempPos.copy(T_eff); 
+                const rollRad = (currentMode === 'IK') ? currentState.roll*DEG_TO_RAD : 0; 
+                const pitchRad = (currentMode === 'IK') ? currentState.pitch*DEG_TO_RAD : 0; 
+                const yawRad = (currentMode === 'IK') ? currentState.yaw*DEG_TO_RAD : 0; 
+                tempEuler.set(rollRad, pitchRad, yawRad, 'ZYX'); 
+                tempQuat.setFromEuler(tempEuler); 
+                tempMatrix.makeRotationFromQuaternion(tempQuat);
+                platformAttachPointsWorld = platformAttachmentPointsLocal.map(pLocal => 
+                    pLocal.clone().applyMatrix4(tempMatrix).add(T_eff)
+                );
+                basePoints = [ 
+                    baseVectors[0].clone().multiplyScalar(currentState.s0),
+                    baseVectors[1].clone().multiplyScalar(currentState.s1),
+                    baseVectors[2].clone().multiplyScalar(currentState.s2) 
+                ];
+                forceOutputs = calculateStaticForces(T_eff, platformAttachPointsWorld, basePoints, currentState.platform_mass, currentState.leg_mass);
+            } else { 
+                forceOutputs = { T0: NaN, T1: NaN, T2: NaN, Fs0: NaN, Fs1: NaN, Fs2: NaN, tau_motor: NaN }; 
+            }
+            Object.assign(currentState, forceOutputs);
+
+            // 3. Update UI
+             fkWarningDiv.style.display = (currentMode === 'FK') ? 'block' : 'none';
+             statusDiv.className = 'status';
+             if (!isMechanismValid) { statusDiv.textContent = `${currentMode} Error: ${result.failureReason}`; statusDiv.classList.add('error'); sliderMeshes.forEach(mesh => mesh.material.color.setHex(sliderColorInvalid)); }
+             else if (result.failureReason) { statusDiv.textContent = `${currentMode} Info: ${result.failureReason}`; statusDiv.classList.add('warning'); sliderMeshes.forEach(mesh => mesh.material.color.setHex(sliderColorValid)); }
+             else { sliderMeshes.forEach(mesh => mesh.material.color.setHex(sliderColorValid)); }
+             // Toggle visibility of force elements based on showForces state
+             controlsGrid.classList.toggle('show-forces', showForces);
+             // Update value displays
+             PARAM_CONFIG.forEach(item => {
+                 const valueDisplay = document.getElementById(`${item.id}-value`); if (!valueDisplay) return; const value = currentState[item.id]; const isInputParam = item.isMass || ((currentMode === 'IK') ? item.isIKInput : !item.isIKInput);
+                 if (value === undefined || isNaN(value)) { valueDisplay.textContent = 'N/A'; valueDisplay.style.color = 'red'; }
+                 else { valueDisplay.textContent = `${value.toFixed(item.decimals)} ${item.unit}`; valueDisplay.style.color = '';
+                     if (item.isForce) { valueDisplay.style.color = '#00008B'; }
+                     else if (!isInputParam && !item.isMass) { valueDisplay.style.color = '#006400'; }
+                     else if (item.id === 'ty' && currentMode === 'IK' && Math.abs(value) > CONSTRAINT_TOLERANCE) { valueDisplay.style.color = 'orange'; } } });
+
+            // 4. Update 3D Visualization
+            const platformVerticesWorld = platformVerticesLocal.map(pLocal => pLocal.clone().applyMatrix4(tempMatrix).add(T_eff)); // Use same T,R for vertices
+            for (let i = 0; i < 3; i++) { /* ... Slider/Leg drawing logic ... */
+                const s_i = currentState[`s${i}`]; const attachPoint = platformAttachPointsWorld[i]; const sliderVisible = isMechanismValid && !isNaN(s_i) && attachPoint && !isNaN(attachPoint.x); sliderMeshes[i].visible = sliderVisible; legLines[i].visible = sliderVisible; const T_i = currentState[`T${i}`]; const legForceVisible = sliderVisible && showForces && !isNaN(T_i); legForceArrows[i].visible = legForceVisible; const Fs_i = currentState[`Fs${i}`]; const sliderForceVisible = sliderVisible && showForces && !isNaN(Fs_i); sliderForceArrows[i].visible = sliderForceVisible;
+                if(sliderVisible) { const sliderPos = basePoints[i]; sliderMeshes[i].position.copy(sliderPos); legLines[i].geometry.setFromPoints([sliderPos, attachPoint]); legLines[i].geometry.computeBoundingSphere();
+                     if (legForceVisible) { const legDir = tempV1.copy(attachPoint).sub(sliderPos).normalize(); legForceArrows[i].position.copy(attachPoint); legForceArrows[i].setDirection(legDir.negate()); legForceArrows[i].setLength(Math.abs(T_i)*FORCE_ARROW_SCALE, 0.03, 0.015); legForceArrows[i].setColor(T_i>0 ? forceArrowColorTension : forceArrowColorCompression); }
+                     if (sliderForceVisible) { sliderForceArrows[i].position.copy(sliderPos); sliderForceArrows[i].setDirection(baseVectors[i].clone().multiplyScalar(Math.sign(Fs_i))); sliderForceArrows[i].setLength(Math.abs(Fs_i)*FORCE_ARROW_SCALE, 0.04, 0.02); sliderForceArrows[i].setColor(sliderForceArrowColor); } }
+             }
+            const platformVisible = isMechanismValid && platformVerticesWorld.every(p=>p && !isNaN(p.x)) && !isNaN(T_eff.x); /* ... Platform drawing logic ... */
+             for(let i=0; i<platformSegments.length; ++i) { platformSegments[i].visible = platformVisible; if (platformVisible) { const idx1 = platformVertexIndices[i][0]; const idx2 = platformVertexIndices[i][1]; if(platformVerticesWorld[idx1] && platformVerticesWorld[idx2]){ platformSegments[i].geometry.setFromPoints([platformVerticesWorld[idx1], platformVerticesWorld[idx2]]); platformSegments[i].geometry.computeBoundingSphere(); } else { platformSegments[i].visible = false; } } }
+        }
+
+        // --- Mode & Force Toggle ---
+        modeToggleButton.addEventListener('click', () => { /* ... Mode toggle logic ... */
+            const lastState = { ...currentState }; const wasValid = isMechanismValid; currentMode = (currentMode === 'IK') ? 'FK' : 'IK'; modeToggleButton.textContent = (currentMode === 'IK') ? 'Switch to FK' : 'Switch to IK';
+            PARAM_CONFIG.forEach(item => { const isInputNow = item.isMass || ((currentMode === 'IK') ? item.isIKInput : !item.isIKInput); if (isInputNow) { currentState[item.id] = (wasValid && lastState[item.id] !== undefined && !isNaN(lastState[item.id])) ? lastState[item.id] : item.value; } else { currentState[item.id] = NaN; } }); if (currentMode === 'IK' && Math.abs(currentState.ty) > CONSTRAINT_TOLERANCE) { currentState.ty = 0.0; } createControls(); });
+        forceToggleButton.addEventListener('click', () => { /* ... Force toggle logic ... */ showForces = !showForces; forceToggleButton.textContent = showForces ? 'Hide Forces' : 'Show Forces'; update(); });
+
+        // --- Resize & Animation ---
+        const resizeObserver = new ResizeObserver(entries => { resizeRenderer(); }); function resizeRenderer() { const controlsHeight = controlsContainer.offsetHeight; if (!controlsContainer || !canvasContainer || controlsHeight <= 0) return; const newWidth = canvasContainer.clientWidth; const newHeight = canvasContainer.clientHeight; camera.aspect = newWidth / newHeight; camera.updateProjectionMatrix(); renderer.setSize(newWidth, newHeight); } resizeObserver.observe(controlsContainer);
+        function animate() { requestAnimationFrame(animate); controls3d.update(); renderer.render(scene, camera); }
+        function init() { createControls(); resizeRenderer(); animate(); } if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
+
+    </script>
+</body>
+</html>

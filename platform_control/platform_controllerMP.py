@@ -654,116 +654,128 @@ class PlatformController:
             self.position_offset = orig_pos_offset
             self.rotation_offset = orig_rot_offset
 
-    def process_trajectory_chunk(self, data_tuple):
-        chunk, shared_data = data_tuple
-        dt = shared_data['dt']
-        apply_optimization = shared_data.get('apply_optimization', True)
-        prev_sliders = shared_data.get('prev_sliders')
-        prev_velocities = shared_data.get('prev_velocities')
-        
-        results = []
-        current_sliders = prev_sliders
-        current_velocities = prev_velocities if prev_velocities is not None else np.zeros(3)
-        
-        for idx, row in chunk.iterrows():
-            target_position = np.array([row['x'], row['y'], row['z']])
-            target_orientation = np.array([row['rx'], row['ry'], row['rz']])
-            
-            # Solve IK for current position
-            solution = self.solve_ik(target_position, target_orientation, 
-                                   previous_solution=current_sliders if apply_optimization else None)
-            
-            if solution is None:
-                raise ValueError(f"No solution found for frame at time {row['time']}")
-                
-            # Calculate velocities and accelerations
-            if current_sliders is not None:
-                velocities = (solution - current_sliders) / dt
-                if current_velocities is not None:
-                    accelerations = (velocities - current_velocities) / dt
-                else:
-                    accelerations = np.zeros_like(velocities)
-            else:
-                velocities = np.zeros_like(solution)
-                accelerations = np.zeros_like(solution)
-            
-            # Store results
-            results.append({
-                'time': row['time'],
-                'slider_positions': solution.copy(),
-                'velocities': velocities.copy(),
-                'accelerations': accelerations.copy()
-            })
-            
-            # Update for next iteration
-            current_sliders = solution.copy()
-            current_velocities = velocities.copy()
-        
-        return results
+    def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True) -> pd.DataFrame:
+        """
+        Process trajectory data from DataFrame and compute slider positions and motor angles.
+        Avoids splitting into chunks to prevent boundary errors.
 
-    def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True, num_cores: int = None) -> pd.DataFrame:
-        if num_cores is None:
-            num_cores = mp.cpu_count()
-        
-        # Calculate time step
+        Args:
+            trajectory_df: DataFrame with columns ['time', 'x', 'y', 'z', 'roll', 'pitch', 'yaw']
+                         angles in degrees
+            file_path: Path to the input Excel file
+            apply_optimization: Whether to apply stored offsets
+
+        Returns:
+            DataFrame with computed slider positions and motor angles
+        """
         dt = trajectory_df['time'].diff().iloc[1]
-        
-        # Split trajectory into chunks for parallel processing
-        chunks = chunk_data(trajectory_df, num_cores * 2)
-        
-        # Initialize storage for chunk results
-        all_results = []
-        unreachable_count = 0
-        unreachable_reasons = {}
-        
-        print(f"\nProcessing trajectory using {num_cores} CPU cores")
-        
-        # Process first chunk to get initial conditions
-        first_chunk_data = (chunks[0], {
+
+        # Prepare shared data
+        shared_data = {
             'dt': dt,
             'apply_optimization': apply_optimization,
-            'prev_sliders': None,
-            'prev_velocities': None
-        })
-        first_chunk_results = self.process_trajectory_chunk(first_chunk_data)
-        all_results.extend(first_chunk_results)
-        
-        # Get final state from first chunk for continuity
-        last_sliders = first_chunk_results[-1]['slider_positions']
-        last_velocities = first_chunk_results[-1]['velocities']
-        
-        with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            futures = []
-            
-            # Process remaining chunks with proper initial conditions from previous chunk
-            for chunk in chunks[1:]:
-                shared_data = {
-                    'dt': dt,
-                    'apply_optimization': apply_optimization,
-                    'prev_sliders': last_sliders.copy(),  # Pass copy of last state
-                    'prev_velocities': last_velocities.copy()
-                }
-                futures.append(executor.submit(self.process_trajectory_chunk, (chunk, shared_data)))
-                
-                # Process results as they complete
-                for future in tqdm(as_completed(futures), total=len(chunks)-1, 
-                                 desc="Processing trajectory chunks", unit="chunk"):
-                    try:
-                        chunk_results = future.result()
-                        # Update last state for next chunk
-                        last_sliders = chunk_results[-1]['slider_positions']
-                        last_velocities = chunk_results[-1]['velocities']
-                        all_results.extend(chunk_results)
-                    except Exception as e:
-                        print(f"\nChunk processing failed: {str(e)}")
-                        continue
+            'prev_sliders': None
+        }
+
+        all_results = []
+
+        print("\nProcessing trajectory without chunking")
+        prev_sliders = None
+
+        for _, row in trajectory_df.iterrows():
+            try:
+                # Apply offsets if optimization is enabled
+                if apply_optimization:
+                    position = np.array([
+                        row['x'] + self.position_offset[0],
+                        row['y'] + self.position_offset[1],
+                        row['z'] + self.position_offset[2]
+                    ])
+                    angles = np.array([
+                        row['roll'] + self.rotation_offset[0],
+                        row['pitch'] + self.rotation_offset[1],
+                        row['yaw'] + self.rotation_offset[2]
+                    ])
+                else:
+                    position = np.array([row['x'], row['y'], row['z']])
+                    angles = np.array([row['roll'], row['pitch'], row['yaw']])
+
+                # Create rotation matrix from angles
+                roll, pitch, yaw = np.radians(angles)
+                Rx = np.array([[1, 0, 0],
+                             [0, np.cos(roll), -np.sin(roll)],
+                             [0, np.sin(roll), np.cos(roll)]])
+                Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                             [0, 1, 0],
+                             [-np.sin(pitch), 0, np.cos(pitch)]])
+                Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                             [np.sin(yaw), np.cos(yaw), 0],
+                             [0, 0, 1]])
+                rotation = Rz @ Ry @ Rx
+
+                # Optimize platform orientation
+                opt_position, opt_rotation = self.optimize_platform_orientation(position, rotation, time=row['time'])
+                opt_angles = Rotation.from_matrix(opt_rotation).as_euler('xyz', degrees=True)
+
+                # Calculate slider positions and motor angle
+                platform_points = self.transform_platform_points(opt_position, opt_rotation)
+                slider_positions, motor_angle, joint_angles = self.calculate_slider_positions(
+                    platform_points, 
+                    time=row['time'],
+                    platform_pos=opt_position,
+                    platform_rot=opt_angles,
+                    debug=False
+                )
+
+                # Calculate velocities and accelerations
+                if prev_sliders is not None:
+                    velocities = (slider_positions - prev_sliders) / dt
+                    if len(all_results) > 0:
+                        prev_velocities = all_results[-1]['velocities']
+                        accelerations = (velocities - prev_velocities) / dt
+                    else:
+                        accelerations = np.zeros(3)
+                else:
+                    velocities = np.zeros(3)
+                    accelerations = np.zeros(3)
+
+                all_results.append({
+                    'time': row['time'],
+                    'slider_positions': slider_positions,
+                    'motor_angle': motor_angle,
+                    'velocities': velocities,
+                    'accelerations': accelerations,
+                    'joint_angles': joint_angles,
+                    'platform_position': opt_position,
+                    'platform_rotation': opt_angles,
+                    'x': opt_position[0],
+                    'y': opt_position[1],
+                    'z': opt_position[2],
+                    'roll': opt_angles[0],
+                    'pitch': opt_angles[1],
+                    'yaw': opt_angles[2],
+                    'slider1': slider_positions[0],
+                    'slider2': slider_positions[1],
+                    'slider3': slider_positions[2],
+                    'velocity1': velocities[0],
+                    'velocity2': velocities[1],
+                    'velocity3': velocities[2],
+                    'acceleration1': accelerations[0],
+                    'acceleration2': accelerations[1],
+                    'acceleration3': accelerations[2]
+                })
+
+                prev_sliders = slider_positions
+
+            except ValueError as e:
+                continue
 
         # Sort results by time
         all_results.sort(key=lambda x: x['time'])
-        
+
         # Create DataFrame with results
         results_df = pd.DataFrame(all_results)
-        
+
         # Create the output file name based on the input file name
         input_file_name = os.path.basename(file_path).replace('.xlsx', '')
         output_file = f"{input_file_name}_platform_motion.xlsx"
@@ -777,18 +789,12 @@ class PlatformController:
         print(f"\nExporting results to {os.path.abspath(output_file)}...")
         with ThreadPoolExecutor() as executor:
             executor.submit(self.export_results_to_excel, results_df, output_file)
-        
+
         print(f"\nResults successfully exported to {os.path.abspath(output_file)}")
         print("\nKey Statistics:")
         print(f"Peak Velocity: {results_df['velocity1'].max():.3f} m/s")
         print(f"Peak Acceleration: {results_df['acceleration1'].max():.3f} m/s²")
-        
-        if unreachable_count > 0:
-            print(f"\nWarning: {unreachable_count} points ({unreachable_count/len(trajectory_df)*100:.1f}%) were unreachable")
-            print("Common reasons for unreachable points:")
-            for reason, count in unreachable_reasons.items():
-                print(f"- {reason}: {count} occurrences")
-        
+
         return results_df
 
     def export_results_to_excel(self, results_df: pd.DataFrame, output_file: str):

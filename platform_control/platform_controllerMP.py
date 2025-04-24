@@ -436,15 +436,15 @@ class PlatformController:
         min_z_traj = trajectory_df['z'].min()
         max_z_traj = trajectory_df['z'].max()
         
-        # Calculate z offset bounds
-        z_offset_min = max(-min_z_traj, -self.leg_length/2)
+        # Calculate z offset bounds to ensure positive z values
+        z_offset_min = max(0, -min_z_traj)  # Force minimum z offset to be non-negative
         z_offset_max = min(self.leg_length - max_z_traj, self.leg_length/2)
         z_mid = (z_offset_min + z_offset_max) / 2
         
         bounds = [
             (-self.leg_length, self.leg_length),  # x offset: ±leg_length
             (-0.2, 0.2),  # y offset
-            (z_offset_min, z_offset_max),  # z offset with new bounds
+            (z_offset_min, z_offset_max),  # z offset with new bounds (always non-negative)
             (-40, 40),    # roll offset (degrees)
             (-40, 40),    # pitch offset (degrees)
             (-40, 40)     # yaw offset (degrees)
@@ -565,12 +565,18 @@ class PlatformController:
             prev_slider_positions = None
             for _, row in trajectory_df.iterrows():
                 try:
-                    # Apply offsets
+                    # Apply offsets with explicit z-position non-negative constraint
                     position = np.array([
                         row['x'] + pos_offset[0],
                         row['y'] + pos_offset[1],
-                        row['z'] + pos_offset[2]
+                        max(0, row['z'] + pos_offset[2])  # Force z position to be non-negative
                     ])
+                    
+                    # Add large penalty for attempted negative z positions
+                    if row['z'] + pos_offset[2] < 0:
+                        total_error += 1e6  # Large penalty
+                        all_positions_feasible = False
+                    
                     angles = np.array([
                         row['roll'] + rot_offset[0],
                         row['pitch'] + rot_offset[1],

@@ -359,46 +359,6 @@ class PlatformController:
         
         return slider_positions, math.degrees(motor_angle), joint_angles
 
-    def select_closest_slider_position(self, current_positions: np.ndarray, previous_positions: np.ndarray, rail_vectors: List[np.ndarray]) -> np.ndarray:
-        """
-        Select the slider positions closest to the previous positions and ensure continuity.
-
-        Args:
-            current_positions: Array of current possible slider positions.
-            previous_positions: Array of previous slider positions.
-            rail_vectors: List of rail direction vectors.
-
-        Returns:
-            Array of selected slider positions.
-        """
-        selected_positions = np.zeros_like(current_positions)
-
-        for i, (current, previous, rail_vector) in enumerate(zip(current_positions, previous_positions, rail_vectors)):
-            # Calculate the distance to the previous position for both possible solutions
-            distances = [np.linalg.norm(current - previous), np.linalg.norm(-current - previous)]
-
-            # Check if the positions are within bounds
-            in_bounds = [0 <= current <= self.rail_max_travel, 0 <= -current <= self.rail_max_travel]
-
-            # Select the closest position that is in bounds
-            if in_bounds[0] and (not in_bounds[1] or distances[0] < distances[1]):
-                selected_positions[i] = current
-            elif in_bounds[1]:
-                selected_positions[i] = -current
-            else:
-                # If neither position is in bounds, raise an error
-                raise ValueError(f"No feasible slider position found for slider {i+1}")
-
-            # Prefer continuity in direction but allow switching if necessary
-            if np.dot(selected_positions[i] - previous, rail_vector) < 0:
-                # Check if switching direction is feasible
-                alternative_position = -selected_positions[i]
-                alternative_distance = np.linalg.norm(alternative_position - previous)
-                if alternative_distance < distances[0] or np.dot(alternative_position - previous, rail_vector) > 0:
-                    selected_positions[i] = alternative_position
-
-        return selected_positions
-
     def optimize_platform_orientation(self, target_position: np.ndarray, target_rotation: np.ndarray, time: float = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Optimize platform orientation to minimize slider movements while maintaining target position
@@ -495,7 +455,7 @@ class PlatformController:
         print(f"  Y offset: ±0.2m")
         print(f"  Z offset: [{z_offset_min:.3f}m, {z_offset_max:.3f}m]")
         print(f"  Z mid-point: {z_mid:.3f}m")
-        print(f"  Rotation offsets: ±40 degre40")
+        print(f"  Rotation offsets: ±40 degrees")
         print(f"\nTrajectory ranges:")
         print(f"  Original z range: [{min_z_traj:.3f}m, {max_z_traj:.3f}m]")
         print(f"\nUsing {num_cores} CPU cores for optimization")
@@ -766,14 +726,6 @@ class PlatformController:
                     platform_rot=opt_angles,
                     debug=False
                 )
-
-                # Ensure continuity in slider positions
-                if prev_sliders is not None:
-                    slider_positions = self.select_closest_slider_position(
-                        current_positions=slider_positions,
-                        previous_positions=prev_sliders,
-                        rail_vectors=self.rail_vectors
-                    )
 
                 # Calculate velocities and accelerations
                 if prev_sliders is not None:

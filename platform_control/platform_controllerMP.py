@@ -3,10 +3,63 @@ import pandas as pd
 from scipy.spatial.transform import Rotation
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 import math
 from tqdm import tqdm
 import os
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from functools import partial
+import threading
+
+# Thread-safe progress bar
+class ThreadSafeCounter:
+    def __init__(self):
+        self.value = 0
+        self.lock = threading.Lock()
+
+    def increment(self):
+        with self.lock:
+            self.value += 1
+            return self.value
+
+def chunk_data(data: pd.DataFrame, num_chunks: int) -> List[pd.DataFrame]:
+    """Split data into optimal chunk sizes for parallel processing"""
+    chunk_size = max(1, len(data) // num_chunks)
+    return [data.iloc[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]], trajectory_df: pd.DataFrame, controller: 'PlatformController') -> Dict:
+    """Standalone function to run optimization with a single initial guess"""
+    try:
+        result = minimize(
+            controller.objective_function,
+            x0=x0,
+            args=(trajectory_df,),
+            method='SLSQP',
+            bounds=bounds,
+            options={'maxiter': 100, 'ftol': 1e-6}  # Increased precision
+        )
+        
+        # Check if this solution is feasible by looking at controller's best_feasible_solution
+        is_feasible = hasattr(controller, 'best_feasible_solution') and controller.best_feasible_solution is not None
+        
+        return {
+            'success': result.success,
+            'x': result.x,
+            'fun': result.fun,
+            'message': result.message,
+            'is_feasible': is_feasible,
+            'feasible_score': controller.best_feasible_solution['score'] if is_feasible else None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'x': x0,
+            'fun': float('inf'),
+            'is_feasible': False,
+            'feasible_score': None
+        }
 
 class PlatformController:
     def __init__(self, leg_length: float, rail_max_travel: float):
@@ -306,8 +359,185 @@ class PlatformController:
         
         return slider_positions, math.degrees(motor_angle), joint_angles
 
-    def objective_function(self, params: np.ndarray, trajectory_df: pd.DataFrame, attempt_number: int = None, callback=None) -> float:
-        """Objective function for optimization with progress reporting"""
+    def optimize_platform_orientation(self, target_position: np.ndarray, target_rotation: np.ndarray, time: float = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Optimize platform orientation to minimize slider movements while maintaining target position
+        
+        Args:
+            target_position: [x, y, z] target position
+            target_rotation: 3x3 target rotation matrix
+            time: Current time in seconds (optional)
+            
+        Returns:
+            Tuple of (optimized_position, optimized_rotation)
+        """
+        def objective(params):
+            # params: [x, y, z, rx, ry, rz] (euler angles in radians)
+            position = params[:3]
+            angles_rad = params[3:]
+            
+            # Create rotation matrix from Euler angles
+            Rx = np.array([[1, 0, 0],
+                          [0, np.cos(angles_rad[0]), -np.sin(angles_rad[0])],
+                          [0, np.sin(angles_rad[0]), np.cos(angles_rad[0])]])
+            Ry = np.array([[np.cos(angles_rad[1]), 0, np.sin(angles_rad[1])],
+                          [0, 1, 0],
+                          [-np.sin(angles_rad[1]), 0, np.cos(angles_rad[1])]])
+            Rz = np.array([[np.cos(angles_rad[2]), -np.sin(angles_rad[2]), 0],
+                          [np.sin(angles_rad[2]), np.cos(angles_rad[2]), 0],
+                          [0, 0, 1]])
+            rotation = Rz @ Ry @ Rx
+            angles_deg = np.degrees(angles_rad)
+            
+            try:
+                platform_points = self.transform_platform_points(position, rotation)
+                slider_positions, motor_angle, _ = self.calculate_slider_positions(
+                    platform_points, 
+                    time=time,
+                    platform_pos=position,
+                    platform_rot=angles_deg,
+                    debug=False
+                )
+                
+                # Minimize deviation from target position and orientation
+                pos_error = np.linalg.norm(position - target_position)
+                rot_error = np.linalg.norm(rotation - target_rotation, ord='fro')
+                
+                return pos_error + rot_error
+            except ValueError:
+                return 1e6  # Return large value for invalid configurations
+        
+        # Initial guess: use target position and rotation
+        initial_euler = Rotation.from_matrix(target_rotation).as_euler('xyz')
+        initial_guess = np.concatenate([target_position, initial_euler])
+        
+        # Optimize
+        result = minimize(objective, initial_guess, method='SLSQP')
+        
+        if not result.success:
+            raise ValueError("Failed to optimize platform orientation")
+        
+        optimized_position = result.x[:3]
+        optimized_rotation = Rotation.from_euler('xyz', result.x[3:]).as_matrix()
+        
+        return optimized_position, optimized_rotation
+
+    def optimize_offsets(self, trajectory_df: pd.DataFrame, num_cores: int = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Optimize position and rotation offsets with feasibility tracking
+        """
+        if num_cores is None:
+            num_cores = mp.cpu_count()
+
+        # Initialize best feasible solution tracker
+        self.best_feasible_solution = None
+        
+        # Get minimum and maximum z positions from trajectory
+        min_z_traj = trajectory_df['z'].min()
+        max_z_traj = trajectory_df['z'].max()
+        
+        # Calculate z offset bounds
+        z_offset_min = max(-min_z_traj, -self.leg_length/2)
+        z_offset_max = min(self.leg_length - max_z_traj, self.leg_length/2)
+        z_mid = (z_offset_min + z_offset_max) / 2
+        
+        bounds = [
+            (-self.leg_length, self.leg_length),  # x offset: ±leg_length
+            (-0.2, 0.2),  # y offset
+            (z_offset_min, z_offset_max),  # z offset with new bounds
+            (-40, 40),    # roll offset (degrees)
+            (-40, 40),    # pitch offset (degrees)
+            (-40, 40)     # yaw offset (degrees)
+        ]
+        
+        print(f"\nOptimization bounds:")
+        print(f"  X offset: ±{self.leg_length:.3f}m")
+        print(f"  Y offset: ±0.2m")
+        print(f"  Z offset: [{z_offset_min:.3f}m, {z_offset_max:.3f}m]")
+        print(f"  Z mid-point: {z_mid:.3f}m")
+        print(f"  Rotation offsets: ±40 degrees")
+        print(f"\nTrajectory ranges:")
+        print(f"  Original z range: [{min_z_traj:.3f}m, {max_z_traj:.3f}m]")
+        print(f"\nUsing {num_cores} CPU cores for optimization")
+        
+        # Create systematic initial guesses
+        initial_guesses = [
+            np.array([0.0, 0.0, z_mid, 0.0, 0.0, 0.0]),     # All centered
+            np.array([self.leg_length/2, 0.0, z_mid, 20.0, 20.0, 20.0]),   # Positive half-range
+            np.array([-self.leg_length/2, 0.0, z_mid, -20.0, -20.0, -20.0]), # Negative half-range
+            np.array([0.0, 0.1, z_mid*1.1, 0.0, 0.0, 0.0]),  # Slight Y offset and higher Z
+            np.array([0.0, -0.1, z_mid*0.9, 0.0, 0.0, 0.0])  # Slight negative Y offset and lower Z
+        ]
+        
+        best_result = None
+        best_score = float('inf')
+        feasible_solutions_found = 0
+        
+        # Run optimizations in parallel
+        with ProcessPoolExecutor(max_workers=num_cores) as executor:
+            futures = [
+                executor.submit(optimize_with_initial_guess, x0, bounds, trajectory_df, self)
+                for x0 in initial_guesses
+            ]
+            
+            # Process results as they complete
+            for future in tqdm(as_completed(futures), total=len(initial_guesses), 
+                             desc="Optimizing offsets", unit="attempt"):
+                try:
+                    result = future.result()
+                    if result['success']:
+                        if hasattr(self, 'best_feasible_solution') and self.best_feasible_solution is not None:
+                            feasible_solutions_found += 1
+                            if result['fun'] < best_score:
+                                best_score = result['fun']
+                                best_result = result
+                                print(f"\nFound better feasible solution:")
+                                print(f"  Score: {best_score:.3f}")
+                                print(f"  Position offset: ({result['x'][0]:.3f}, {result['x'][1]:.3f}, {result['x'][2]:.3f})m")
+                                print(f"  Rotation offset: ({result['x'][3]:.1f}, {result['x'][4]:.1f}, {result['x'][5]:.1f})°")
+                        elif result['fun'] < best_score:
+                            best_score = result['fun']
+                            best_result = result
+                            print(f"\nFound better solution (not feasible):")
+                            print(f"  Score: {best_score:.3f}")
+                            print(f"  Position offset: ({result['x'][0]:.3f}, {result['x'][1]:.3f}, {result['x'][2]:.3f})m")
+                            print(f"  Rotation offset: ({result['x'][3]:.1f}, {result['x'][4]:.1f}, {result['x'][5]:.1f})°")
+                except Exception as e:
+                    print(f"\nOptimization attempt failed: {str(e)}")
+                    continue
+        
+        print(f"\nOptimization complete:")
+        print(f"  Feasible solutions found: {feasible_solutions_found}")
+        
+        if hasattr(self, 'best_feasible_solution') and self.best_feasible_solution is not None:
+            print("\nUsing best feasible solution:")
+            print(f"  Score: {self.best_feasible_solution['score']:.3f}")
+            print(f"  Position offset: ({self.best_feasible_solution['position_offset'][0]:.3f}, "
+                  f"{self.best_feasible_solution['position_offset'][1]:.3f}, "
+                  f"{self.best_feasible_solution['position_offset'][2]:.3f})m")
+            print(f"  Rotation offset: ({self.best_feasible_solution['rotation_offset'][0]:.1f}, "
+                  f"{self.best_feasible_solution['rotation_offset'][1]:.1f}, "
+                  f"{self.best_feasible_solution['rotation_offset'][2]:.1f})°")
+            return self.best_feasible_solution['position_offset'], self.best_feasible_solution['rotation_offset']
+        else:
+            print("\nWarning: No feasible solution found")
+            if best_result is None:
+                # Return zeros if no solution found at all
+                return np.zeros(3), np.zeros(3)
+            return best_result['x'][:3], best_result['x'][3:]  # Access dictionary properly
+
+    def objective_function(self, params: np.ndarray, trajectory_df: pd.DataFrame) -> float:
+        """
+        Objective function for optimization that strongly prefers feasible solutions.
+        Includes scaled penalties for out-of-bounds positions and tracks feasible solutions.
+        
+        Args:
+            params: Array of [x_offset, y_offset, z_offset, roll_offset, pitch_offset, yaw_offset]
+            trajectory_df: DataFrame with trajectory data
+            
+        Returns:
+            float: Objective value (lower is better)
+        """
         pos_offset = params[:3]
         rot_offset = params[3:]
         
@@ -315,11 +545,16 @@ class PlatformController:
         orig_pos_offset = self.position_offset.copy()
         orig_rot_offset = self.rotation_offset.copy()
         
+        # Set new offsets
+        self.position_offset = pos_offset
+        self.rotation_offset = rot_offset
+        
         try:
-            total_error = 0
             unreachable_count = 0
+            total_error = 0
             out_of_bounds_count = 0
             max_out_of_bounds = 0
+            all_positions_feasible = True
             
             # Process each point in the trajectory
             for _, row in trajectory_df.iterrows():
@@ -336,7 +571,7 @@ class PlatformController:
                         row['yaw'] + rot_offset[2]
                     ])
                     
-                    # Create rotation matrix and calculate platform points
+                    # Calculate platform points
                     roll, pitch, yaw = np.radians(angles)
                     Rx = np.array([[1, 0, 0],
                                 [0, np.cos(roll), -np.sin(roll)],
@@ -359,24 +594,41 @@ class PlatformController:
                         debug=False
                     )
                     
-                    # Check bounds and calculate penalties
+                    # Check bounds violations and calculate penalties
                     for pos in slider_positions:
                         if pos < 0:
+                            violation = abs(pos)
                             out_of_bounds_count += 1
-                            max_out_of_bounds = max(max_out_of_bounds, abs(pos))
+                            max_out_of_bounds = max(max_out_of_bounds, violation)
+                            all_positions_feasible = False
                         elif pos > self.rail_max_travel:
+                            violation = pos - self.rail_max_travel
                             out_of_bounds_count += 1
-                            max_out_of_bounds = max(max_out_of_bounds, pos - self.rail_max_travel)
+                            max_out_of_bounds = max(max_out_of_bounds, violation)
+                            all_positions_feasible = False
                     
-                    # Add movement cost (only if point is reachable)
+                    # Add regular movement cost (with reduced weight)
                     total_error += np.sum(np.abs(slider_positions)) * 0.01
                     
                 except Exception:
                     unreachable_count += 1
+                    all_positions_feasible = False
+                    total_error += 10000  # Increased penalty for unreachable points
             
-            # Calculate score with extreme preference for feasible solutions
+            # Calculate final score with extreme preference for feasible solutions
             if unreachable_count > 0 or out_of_bounds_count > 0:
-                score = 1e6 + (unreachable_count * 1e4) + (out_of_bounds_count * 1e3) + (max_out_of_bounds * 1e2)
+                # Apply scaled penalties for violations
+                bounds_penalty = 0
+                if out_of_bounds_count > 0:
+                    # Exponential penalty based on violation magnitude
+                    bounds_penalty = 1000 * (max_out_of_bounds ** 2) * out_of_bounds_count
+                
+                score = (
+                    total_error +  # Base movement cost
+                    bounds_penalty +  # Scaled penalty for out-of-bounds
+                    (unreachable_count * 50000) +  # Heavy penalty for unreachable points
+                    (out_of_bounds_count * 5000)  # Additional penalty per out-of-bounds position
+                )
             else:
                 # Solution is completely feasible, use only movement cost
                 score = total_error
@@ -386,15 +638,11 @@ class PlatformController:
                     self.best_feasible_solution = {
                         'score': score,
                         'position_offset': pos_offset.copy(),
-                        'rotation_offset': rot_offset.copy()
+                        'rotation_offset': rot_offset.copy(),
+                        'max_out_of_bounds': 0,
+                        'out_of_bounds_count': 0,
+                        'unreachable_count': 0
                     }
-            
-            # Report progress if callback provided
-            if callback and attempt_number is not None:
-                callback(attempt_number, pos_offset, rot_offset, score,
-                        self.best_feasible_solution['position_offset'] if hasattr(self, 'best_feasible_solution') else None,
-                        self.best_feasible_solution['rotation_offset'] if hasattr(self, 'best_feasible_solution') else None,
-                        self.best_feasible_solution['score'] if hasattr(self, 'best_feasible_solution') else None)
             
             return score
             
@@ -406,202 +654,145 @@ class PlatformController:
             self.position_offset = orig_pos_offset
             self.rotation_offset = orig_rot_offset
 
-    def optimize_offsets(self, trajectory_df: pd.DataFrame, optimization_callback=None) -> Tuple[np.ndarray, np.ndarray]:
-        """Optimize position and rotation offsets with progress reporting"""
-        # Initialize best feasible solution tracker
-        self.best_feasible_solution = None
+    def process_trajectory_chunk(self, data_tuple):
+        chunk, shared_data = data_tuple
+        dt = shared_data['dt']
+        apply_optimization = shared_data.get('apply_optimization', True)
+        prev_sliders = shared_data.get('prev_sliders')
+        prev_velocities = shared_data.get('prev_velocities')
         
-        # Get minimum and maximum z positions from trajectory
-        min_z_traj = trajectory_df['z'].min()
-        max_z_traj = trajectory_df['z'].max()
-        
-        # Calculate z offset bounds
-        z_offset_min = max(-min_z_traj, -self.leg_length/2)
-        z_offset_max = min(self.leg_length - max_z_traj, self.leg_length/2)
-        
-        # Calculate mid-points
-        z_mid = (z_offset_min + z_offset_max) / 2
-        
-        # Bounds for optimization
-        bounds = [
-            (-self.leg_length, self.leg_length),  # x offset: ±leg_length
-            (-0.2, 0.2),  # y offset
-            (z_offset_min, z_offset_max),  # z offset with new bounds
-            (-40, 40),    # roll offset (degrees)
-            (-40, 40),    # pitch offset (degrees)
-            (-40, 40)     # yaw offset (degrees)
-        ]
-        
-        print(f"\nOptimization bounds:")
-        print(f"  X offset: ±{self.leg_length:.3f}m")
-        print(f"  Y offset: ±0.2m")
-        print(f"  Z offset: [{z_offset_min:.3f}m, {z_offset_max:.3f}m]")
-        print(f"  Z mid-point: {z_mid:.3f}m")
-        print(f"  Rotation offsets: ±40 degrees")
-        print(f"\nTrajectory ranges:")
-        print(f"  Original z range: [{min_z_traj:.3f}m, {max_z_traj:.3f}m]")
-        
-        # Create systematic initial guesses
-        initial_guesses = [
-            np.array([0.0, 0.0, z_mid, 0.0, 0.0, 0.0]),     # All centered
-            np.array([self.leg_length/2, 0.0, z_mid, 20.0, 20.0, 20.0]),   # Positive half-range
-            np.array([-self.leg_length/2, 0.0, z_mid, -20.0, -20.0, -20.0]), # Negative half-range
-            np.array([0.0, 0.1, z_mid*1.1, 0.0, 0.0, 0.0]),  # Slight Y offset and higher Z
-            np.array([0.0, -0.1, z_mid*0.9, 0.0, 0.0, 0.0])  # Slight negative Y offset and lower Z
-        ]
-        
-        best_result = None
-        best_score = float('inf')
-        
-        # Add progress bar for optimization attempts
-        for attempt, x0 in enumerate(initial_guesses, 1):
-            result = minimize(
-                self.objective_function,
-                x0=x0,
-                args=(trajectory_df, attempt, optimization_callback),
-                method='SLSQP',
-                bounds=bounds,
-                options={'maxiter': 100}
-            )
-            
-            if result.success and result.fun < best_score:
-                best_score = result.fun
-                best_result = result
-                print(f"\nFound better solution with score: {best_score:.3f}")
-                print(f"  Position offset: ({result.x[0]:.3f}, {result.x[1]:.3f}, {result.x[2]:.3f})m")
-                print(f"  Rotation offset: ({result.x[3]:.1f}, {result.x[4]:.1f}, {result.x[5]:.1f})°")
-        
-        # After optimization, check if we found a feasible solution
-        if hasattr(self, 'best_feasible_solution') and self.best_feasible_solution is not None:
-            print("\nBest feasible solution found:")
-            print(f"  Score: {self.best_feasible_solution['score']:.3f}")
-            print(f"  Position offset: ({self.best_feasible_solution['position_offset'][0]:.3f}, "
-                  f"{self.best_feasible_solution['position_offset'][1]:.3f}, "
-                  f"{self.best_feasible_solution['position_offset'][2]:.3f})m")
-            print(f"  Rotation offset: ({self.best_feasible_solution['rotation_offset'][0]:.1f}, "
-                  f"{self.best_feasible_solution['rotation_offset'][1]:.1f}, "
-                  f"{self.best_feasible_solution['rotation_offset'][2]:.1f})°")
-            return self.best_feasible_solution['position_offset'], self.best_feasible_solution['rotation_offset']
-        else:
-            print("\nNo completely feasible solution found")
-            return best_result.x[:3], best_result.x[3:]
-
-    def process_trajectory(self, trajectory_df: pd.DataFrame, apply_optimization: bool = True) -> pd.DataFrame:
-        """
-        Process trajectory data from DataFrame and compute slider positions and motor angles
-        
-        Args:
-            trajectory_df: DataFrame with columns ['time', 'x', 'y', 'z', 'roll', 'pitch', 'yaw']
-                         angles in degrees
-            apply_optimization: Whether to apply stored offsets
-            
-        Returns:
-            DataFrame with computed slider positions and motor angles
-        """
         results = []
-        prev_sliders = None
-        dt = trajectory_df['time'].diff().iloc[1]  # Time step
+        current_sliders = prev_sliders
+        current_velocities = prev_velocities if prev_velocities is not None else np.zeros(3)
+        
+        for idx, row in chunk.iterrows():
+            target_position = np.array([row['x'], row['y'], row['z']])
+            target_orientation = np.array([row['rx'], row['ry'], row['rz']])
+            
+            # Solve IK for current position
+            solution = self.solve_ik(target_position, target_orientation, 
+                                   previous_solution=current_sliders if apply_optimization else None)
+            
+            if solution is None:
+                raise ValueError(f"No solution found for frame at time {row['time']}")
+                
+            # Calculate velocities and accelerations
+            if current_sliders is not None:
+                velocities = (solution - current_sliders) / dt
+                if current_velocities is not None:
+                    accelerations = (velocities - current_velocities) / dt
+                else:
+                    accelerations = np.zeros_like(velocities)
+            else:
+                velocities = np.zeros_like(solution)
+                accelerations = np.zeros_like(solution)
+            
+            # Store results
+            results.append({
+                'time': row['time'],
+                'slider_positions': solution.copy(),
+                'velocities': velocities.copy(),
+                'accelerations': accelerations.copy()
+            })
+            
+            # Update for next iteration
+            current_sliders = solution.copy()
+            current_velocities = velocities.copy()
+        
+        return results
+
+    def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True, num_cores: int = None) -> pd.DataFrame:
+        if num_cores is None:
+            num_cores = mp.cpu_count()
+        
+        # Calculate time step
+        dt = trajectory_df['time'].diff().iloc[1]
+        
+        # Split trajectory into chunks for parallel processing
+        chunks = chunk_data(trajectory_df, num_cores * 2)
+        
+        # Initialize storage for chunk results
+        all_results = []
         unreachable_count = 0
         unreachable_reasons = {}
         
-        # Process each row sequentially
-        for _, row in tqdm(trajectory_df.iterrows(), total=len(trajectory_df),
-                          desc="Processing trajectory", unit="points"):
-            try:
-                # Apply offsets if optimization is enabled
-                if apply_optimization:
-                    position = np.array([
-                        row['x'] + self.position_offset[0],
-                        row['y'] + self.position_offset[1],
-                        row['z'] + self.position_offset[2]
-                    ])
-                    angles = np.array([
-                        row['roll'] + self.rotation_offset[0],
-                        row['pitch'] + self.rotation_offset[1],
-                        row['yaw'] + self.rotation_offset[2]
-                    ])
-                else:
-                    position = np.array([row['x'], row['y'], row['z']])
-                    angles = np.array([row['roll'], row['pitch'], row['yaw']])
+        print(f"\nProcessing trajectory using {num_cores} CPU cores")
+        
+        # Process first chunk to get initial conditions
+        first_chunk_data = (chunks[0], {
+            'dt': dt,
+            'apply_optimization': apply_optimization,
+            'prev_sliders': None,
+            'prev_velocities': None
+        })
+        first_chunk_results = self.process_trajectory_chunk(first_chunk_data)
+        all_results.extend(first_chunk_results)
+        
+        # Get final state from first chunk for continuity
+        last_sliders = first_chunk_results[-1]['slider_positions']
+        last_velocities = first_chunk_results[-1]['velocities']
+        
+        with ProcessPoolExecutor(max_workers=num_cores) as executor:
+            futures = []
+            
+            # Process remaining chunks with proper initial conditions from previous chunk
+            for chunk in chunks[1:]:
+                shared_data = {
+                    'dt': dt,
+                    'apply_optimization': apply_optimization,
+                    'prev_sliders': last_sliders.copy(),  # Pass copy of last state
+                    'prev_velocities': last_velocities.copy()
+                }
+                futures.append(executor.submit(self.process_trajectory_chunk, (chunk, shared_data)))
                 
-                # Create rotation matrix from angles
-                roll, pitch, yaw = np.radians(angles)
-                Rx = np.array([[1, 0, 0],
-                             [0, np.cos(roll), -np.sin(roll)],
-                             [0, np.sin(roll), np.cos(roll)]])
-                Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
-                             [0, 1, 0],
-                             [-np.sin(pitch), 0, np.cos(pitch)]])
-                Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                             [np.sin(yaw), np.cos(yaw), 0],
-                             [0, 0, 1]])
-                rotation = Rz @ Ry @ Rx
+                # Process results as they complete
+                for future in tqdm(as_completed(futures), total=len(chunks)-1, 
+                                 desc="Processing trajectory chunks", unit="chunk"):
+                    try:
+                        chunk_results = future.result()
+                        # Update last state for next chunk
+                        last_sliders = chunk_results[-1]['slider_positions']
+                        last_velocities = chunk_results[-1]['velocities']
+                        all_results.extend(chunk_results)
+                    except Exception as e:
+                        print(f"\nChunk processing failed: {str(e)}")
+                        continue
 
-                # Optimize platform orientation
-                opt_position, opt_rotation = self.optimize_platform_orientation(position, rotation, time=row['time'])
-                opt_angles = Rotation.from_matrix(opt_rotation).as_euler('xyz', degrees=True)
-                
-                # Calculate slider positions and motor angle
-                platform_points = self.transform_platform_points(opt_position, opt_rotation)
-                slider_positions, motor_angle, joint_angles = self.calculate_slider_positions(
-                    platform_points, 
-                    time=row['time'],
-                    platform_pos=opt_position,
-                    platform_rot=opt_angles,
-                    debug=False
-                )
-                
-                # Calculate velocities and accelerations
-                if prev_sliders is not None:
-                    velocities = (slider_positions - prev_sliders) / dt
-                    if len(results) > 0:
-                        prev_velocities = results[-1]['velocities']
-                        accelerations = (velocities - prev_velocities) / dt
-                    else:
-                        accelerations = np.zeros(3)
-                else:
-                    velocities = np.zeros(3)
-                    accelerations = np.zeros(3)
-                
-                results.append({
-                    'time': row['time'],
-                    'slider_positions': slider_positions,
-                    'motor_angle': motor_angle,
-                    'velocities': velocities,
-                    'accelerations': accelerations,
-                    'joint_angles': joint_angles,
-                    'platform_position': opt_position,
-                    'platform_rotation': opt_angles,
-                    'x': opt_position[0],
-                    'y': opt_position[1],
-                    'z': opt_position[2],
-                    'roll': opt_angles[0],
-                    'pitch': opt_angles[1],
-                    'yaw': opt_angles[2],
-                    'slider1': slider_positions[0],
-                    'slider2': slider_positions[1],
-                    'slider3': slider_positions[2],
-                    'velocity1': velocities[0],
-                    'velocity2': velocities[1],
-                    'velocity3': velocities[2],
-                    'acceleration1': accelerations[0],
-                    'acceleration2': accelerations[1],
-                    'acceleration3': accelerations[2]
-                })
-                
-                prev_sliders = slider_positions
-                
-            except ValueError as e:
-                unreachable_count += 1
-                error_msg = str(e)
-                unreachable_reasons[error_msg] = unreachable_reasons.get(error_msg, 0) + 1
-                continue
+        # Sort results by time
+        all_results.sort(key=lambda x: x['time'])
         
         # Create DataFrame with results
-        results_df = pd.DataFrame(results)
+        results_df = pd.DataFrame(all_results)
         
-        # Export results to Excel with multiple sheets
-        output_file = 'trajectory_results.xlsx'
+        # Create the output file name based on the input file name
+        input_file_name = os.path.basename(file_path).replace('.xlsx', '')
+        output_file = f"{input_file_name}_platform_motion.xlsx"
+        print(f"\nCreating output file: {os.path.abspath(output_file)}...")
+
+        # Create an empty Excel file to ensure it works without waiting for the whole code to run
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            pd.DataFrame().to_excel(writer, sheet_name='Placeholder', index=False)
+
+        # Update the export logic to use the new output file name
+        print(f"\nExporting results to {os.path.abspath(output_file)}...")
+        with ThreadPoolExecutor() as executor:
+            executor.submit(self.export_results_to_excel, results_df, output_file)
+        
+        print(f"\nResults successfully exported to {os.path.abspath(output_file)}")
+        print("\nKey Statistics:")
+        print(f"Peak Velocity: {results_df['velocity1'].max():.3f} m/s")
+        print(f"Peak Acceleration: {results_df['acceleration1'].max():.3f} m/s²")
+        
+        if unreachable_count > 0:
+            print(f"\nWarning: {unreachable_count} points ({unreachable_count/len(trajectory_df)*100:.1f}%) were unreachable")
+            print("Common reasons for unreachable points:")
+            for reason, count in unreachable_reasons.items():
+                print(f"- {reason}: {count} occurrences")
+        
+        return results_df
+
+    def export_results_to_excel(self, results_df: pd.DataFrame, output_file: str):
+        """Export results to Excel file"""
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             # Main results sheet with added angles
             main_results = pd.DataFrame({
@@ -615,15 +806,7 @@ class PlatformController:
                 'Platform Z (m)': results_df['z'],
                 'Roll (deg)': results_df['roll'],
                 'Pitch (deg)': results_df['pitch'],
-                'Yaw (deg)': results_df['yaw'],
-                'Leg 1 Vertical Angle (deg)': [angles['leg_slider_joints'][0]['vertical_angle'] for angles in results_df['joint_angles']],
-                'Leg 1 Axis Rotation (deg)': [angles['leg_slider_joints'][0]['leg_axis_rotation'] for angles in results_df['joint_angles']],
-                'Leg 2 Rail Angle (deg)': [angles['leg_slider_joints'][1]['rail_perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 2 Axis Rotation (deg)': [angles['leg_slider_joints'][1]['leg_axis_rotation'] for angles in results_df['joint_angles']],
-                'Leg 2 Perp Angle (deg)': [angles['leg_slider_joints'][1]['perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 3 Rail Angle (deg)': [angles['leg_slider_joints'][2]['rail_perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 3 Axis Rotation (deg)': [angles['leg_slider_joints'][2]['leg_axis_rotation'] for angles in results_df['joint_angles']],
-                'Leg 3 Perp Angle (deg)': [angles['leg_slider_joints'][2]['perp_angle'] for angles in results_df['joint_angles']]
+                'Yaw (deg)': results_df['yaw']
             })
             main_results.to_excel(writer, sheet_name='Positions', index=False)
             
@@ -645,34 +828,7 @@ class PlatformController:
             })
             accelerations.to_excel(writer, sheet_name='Accelerations', index=False)
             
-            # New Angles sheet with detailed joint angles
-            angles_data = {
-                'Time (s)': results_df['time'],
-                # Leg 1 angles
-                'Leg 1 Vertical Angle (deg)': [angles['leg_slider_joints'][0]['vertical_angle'] for angles in results_df['joint_angles']],
-                'Leg 1 Axis Rotation (deg)': [angles['leg_slider_joints'][0]['leg_axis_rotation'] for angles in results_df['joint_angles']],
-                'Leg 1 Platform θ (deg)': [angles['leg_platform_joints'][0]['theta'] for angles in results_df['joint_angles']],
-                'Leg 1 Platform φ (deg)': [angles['leg_platform_joints'][0]['phi'] for angles in results_df['joint_angles']],
-                'Leg 1 Platform ψ (deg)': [angles['leg_platform_joints'][0]['psi'] for angles in results_df['joint_angles']],
-                # Leg 2 angles
-                'Leg 2 Rail Angle (deg)': [angles['leg_slider_joints'][1]['rail_perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 2 Axis Rotation (deg)': [angles['leg_slider_joints'][1]['leg_axis_rotation'] for angles in results_df['joint_angles']],
-                'Leg 2 Perp Angle (deg)': [angles['leg_slider_joints'][1]['perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 2 Platform θ (deg)': [angles['leg_platform_joints'][1]['theta'] for angles in results_df['joint_angles']],
-                'Leg 2 Platform φ (deg)': [angles['leg_platform_joints'][1]['phi'] for angles in results_df['joint_angles']],
-                'Leg 2 Platform ψ (deg)': [angles['leg_platform_joints'][1]['psi'] for angles in results_df['joint_angles']],
-                # Leg 3 angles
-                'Leg 3 Rail Angle (deg)': [angles['leg_slider_joints'][2]['rail_perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 3 Axis Rotation (deg)': [angles['leg_slider_joints'][2]['leg_axis_rotation'] for angles in results_df['joint_angles']],
-                'Leg 3 Perp Angle (deg)': [angles['leg_slider_joints'][2]['perp_angle'] for angles in results_df['joint_angles']],
-                'Leg 3 Platform θ (deg)': [angles['leg_platform_joints'][2]['theta'] for angles in results_df['joint_angles']],
-                'Leg 3 Platform φ (deg)': [angles['leg_platform_joints'][2]['phi'] for angles in results_df['joint_angles']],
-                'Leg 3 Platform ψ (deg)': [angles['leg_platform_joints'][2]['psi'] for angles in results_df['joint_angles']]
-            }
-            angles_df = pd.DataFrame(angles_data)
-            angles_df.to_excel(writer, sheet_name='Angles', index=False)
-            
-            # Statistics sheet
+            # Statistics sheet with expanded metrics
             stats = pd.DataFrame({
                 'Metric': [
                     'Peak Velocity (m/s)',
@@ -683,52 +839,55 @@ class PlatformController:
                     'Min Slider 1 Position (m)',
                     'Min Slider 2 Position (m)',
                     'Min Slider 3 Position (m)',
+                    'Slider 1 Range (m)',
+                    'Slider 2 Range (m)',
+                    'Slider 3 Range (m)',
                     'Position Offset X (m)',
                     'Position Offset Y (m)',
                     'Position Offset Z (m)',
                     'Rotation Offset Roll (deg)',
                     'Rotation Offset Pitch (deg)',
                     'Rotation Offset Yaw (deg)',
-                    'Max Leg 1 Vertical Angle (deg)',
-                    'Max Leg 2 Rail Angle (deg)',
-                    'Max Leg 3 Rail Angle (deg)',
-                    'Min Leg 1 Vertical Angle (deg)',
-                    'Min Leg 2 Rail Angle (deg)',
-                    'Min Leg 3 Rail Angle (deg)'
+                    'Platform X Range (m)',
+                    'Platform Y Range (m)',
+                    'Platform Z Range (m)',
+                    'Roll Range (deg)',
+                    'Pitch Range (deg)',
+                    'Yaw Range (deg)',
+                    'Total Points',
+                    'Unreachable Points',
+                    'Success Rate (%)'
                 ],
                 'Value': [
-                    np.max([np.abs(v) for v in results_df['velocities']]),
-                    np.max([np.abs(a) for a in results_df['accelerations']]),
-                    np.max(results_df['slider1']),
-                    np.max(results_df['slider2']),
-                    np.max(results_df['slider3']),
-                    np.min(results_df['slider1']),
-                    np.min(results_df['slider2']),
-                    np.min(results_df['slider3']),
+                    np.max([np.abs(results_df['velocity1'].max()), np.abs(results_df['velocity2'].max()), np.abs(results_df['velocity3'].max())]),
+                    np.max([np.abs(results_df['acceleration1'].max()), np.abs(results_df['acceleration2'].max()), np.abs(results_df['acceleration3'].max())]),
+                    results_df['slider1'].max(),
+                    results_df['slider2'].max(),
+                    results_df['slider3'].max(),
+                    results_df['slider1'].min(),
+                    results_df['slider2'].min(),
+                    results_df['slider3'].min(),
+                    results_df['slider1'].max() - results_df['slider1'].min(),
+                    results_df['slider2'].max() - results_df['slider2'].min(),
+                    results_df['slider3'].max() - results_df['slider3'].min(),
                     self.position_offset[0],
                     self.position_offset[1],
                     self.position_offset[2],
                     self.rotation_offset[0],
                     self.rotation_offset[1],
                     self.rotation_offset[2],
-                    max([angles['leg_slider_joints'][0]['vertical_angle'] for angles in results_df['joint_angles']]),
-                    max([angles['leg_slider_joints'][1]['rail_perp_angle'] for angles in results_df['joint_angles']]),
-                    max([angles['leg_slider_joints'][2]['rail_perp_angle'] for angles in results_df['joint_angles']]),
-                    min([angles['leg_slider_joints'][0]['vertical_angle'] for angles in results_df['joint_angles']]),
-                    min([angles['leg_slider_joints'][1]['rail_perp_angle'] for angles in results_df['joint_angles']]),
-                    min([angles['leg_slider_joints'][2]['rail_perp_angle'] for angles in results_df['joint_angles']])
+                    results_df['x'].max() - results_df['x'].min(),
+                    results_df['y'].max() - results_df['y'].min(),
+                    results_df['z'].max() - results_df['z'].min(),
+                    results_df['roll'].max() - results_df['roll'].min(),
+                    results_df['pitch'].max() - results_df['pitch'].min(),
+                    results_df['yaw'].max() - results_df['yaw'].min(),
+                    len(results_df),
+                    0,  # Placeholder for unreachable points
+                    100.0  # Placeholder for success rate
                 ]
             })
             stats.to_excel(writer, sheet_name='Statistics', index=False)
-        
-        print(f"\nResults exported to {os.path.abspath(output_file)}")
-        
-        if unreachable_count > 0:
-            print(f"\nTrajectory Analysis:")
-            print(f"Total points: {len(trajectory_df)}")
-            print(f"Unreachable points: {unreachable_count} ({unreachable_count/len(trajectory_df)*100:.1f}%)")
-        
-        return results_df
 
     def plot_results(self, results_df: pd.DataFrame):
         """Plot the trajectory results"""
@@ -832,7 +991,7 @@ def main():
     
     # First process trajectory without optimization
     print("\nProcessing trajectory without optimization...")
-    results_df_no_opt = controller.process_trajectory(trajectory_df, apply_optimization=False)
+    results_df_no_opt = controller.process_trajectory(trajectory_df, file_path=file_path, apply_optimization=False)
     
     # Get initial position without optimization
     initial_pos_no_opt = results_df_no_opt['platform_position'].iloc[0]
@@ -862,7 +1021,7 @@ def main():
     
     print("\nProcessing trajectory with optimized offsets...")
     # Process trajectory with optimized offsets
-    results_df = controller.process_trajectory(trajectory_df)
+    results_df = controller.process_trajectory(trajectory_df, file_path=file_path)
     
     # Get initial position with optimization
     initial_pos_opt = results_df['platform_position'].iloc[0]

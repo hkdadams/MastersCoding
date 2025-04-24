@@ -518,6 +518,11 @@ class PlatformController:
             print(f"  Rotation offset: ({self.best_feasible_solution['rotation_offset'][0]:.1f}, "
                   f"{self.best_feasible_solution['rotation_offset'][1]:.1f}, "
                   f"{self.best_feasible_solution['rotation_offset'][2]:.1f})°")
+
+            # Ensure the optimal offsets are assigned to the self object
+            self.position_offset = self.best_feasible_solution['position_offset']
+            self.rotation_offset = self.best_feasible_solution['rotation_offset']
+
             return self.best_feasible_solution['position_offset'], self.best_feasible_solution['rotation_offset']
         else:
             print("\nWarning: No feasible solution found")
@@ -885,12 +890,12 @@ class PlatformController:
                     results_df['slider1'].max() - results_df['slider1'].min(),
                     results_df['slider2'].max() - results_df['slider2'].min(),
                     results_df['slider3'].max() - results_df['slider3'].min(),
-                    self.position_offset[0],
-                    self.position_offset[1],
-                    self.position_offset[2],
-                    self.rotation_offset[0],
-                    self.rotation_offset[1],
-                    self.rotation_offset[2],
+                    self.position_offset[0],  # Correctly display optimized position offset X
+                    self.position_offset[1],  # Correctly display optimized position offset Y
+                    self.position_offset[2],  # Correctly display optimized position offset Z
+                    self.rotation_offset[0],  # Correctly display optimized rotation offset Roll
+                    self.rotation_offset[1],  # Correctly display optimized rotation offset Pitch
+                    self.rotation_offset[2],  # Correctly display optimized rotation offset Yaw
                     results_df['x'].max() - results_df['x'].min(),
                     results_df['y'].max() - results_df['y'].min(),
                     results_df['z'].max() - results_df['z'].min(),

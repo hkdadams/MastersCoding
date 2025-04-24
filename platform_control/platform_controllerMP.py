@@ -555,8 +555,9 @@ class PlatformController:
             out_of_bounds_count = 0
             max_out_of_bounds = 0
             all_positions_feasible = True
-            
+
             # Process each point in the trajectory
+            prev_slider_positions = None
             for _, row in trajectory_df.iterrows():
                 try:
                     # Apply offsets
@@ -570,7 +571,7 @@ class PlatformController:
                         row['pitch'] + rot_offset[1],
                         row['yaw'] + rot_offset[2]
                     ])
-                    
+
                     # Calculate platform points
                     roll, pitch, yaw = np.radians(angles)
                     Rx = np.array([[1, 0, 0],
@@ -583,9 +584,9 @@ class PlatformController:
                                 [np.sin(yaw), np.cos(yaw), 0],
                                 [0, 0, 1]])
                     rotation = Rz @ Ry @ Rx
-                    
+
                     platform_points = self.transform_platform_points(position, rotation)
-                    
+
                     # Try to calculate slider positions
                     slider_positions, _, _ = self.calculate_slider_positions(
                         platform_points,
@@ -593,7 +594,7 @@ class PlatformController:
                         platform_rot=angles,
                         debug=False
                     )
-                    
+
                     # Check bounds violations and calculate penalties
                     for pos in slider_positions:
                         if pos < 0:
@@ -606,10 +607,18 @@ class PlatformController:
                             out_of_bounds_count += 1
                             max_out_of_bounds = max(max_out_of_bounds, violation)
                             all_positions_feasible = False
-                    
+
+                    # Add penalty for large accelerations
+                    if prev_slider_positions is not None:
+                        accelerations = (slider_positions - prev_slider_positions) / trajectory_df['time'].diff().iloc[1]
+                        acceleration_penalty = np.sum(np.abs(accelerations) ** 2) * 1000  # Quadratic penalty
+                        total_error += acceleration_penalty
+
+                    prev_slider_positions = slider_positions
+
                     # Add regular movement cost (with reduced weight)
                     total_error += np.sum(np.abs(slider_positions)) * 0.01
-                    
+
                 except Exception:
                     unreachable_count += 1
                     all_positions_feasible = False

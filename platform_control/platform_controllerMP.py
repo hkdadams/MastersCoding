@@ -28,13 +28,13 @@ def chunk_data(data: pd.DataFrame, num_chunks: int) -> List[pd.DataFrame]:
     chunk_size = max(1, len(data) // num_chunks)
     return [data.iloc[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
 
-def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]], trajectory_df: pd.DataFrame, controller: 'PlatformController') -> Dict:
+def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]], trajectory_df: pd.DataFrame, controller: 'PlatformController', file_path: str) -> Dict:
     """Standalone function to run optimization with a single initial guess"""
     try:
         result = minimize(
             controller.objective_function,
             x0=x0,
-            args=(trajectory_df,),
+            args=(trajectory_df, file_path),
             method='SLSQP',
             bounds=bounds,
             options={'maxiter': 100, 'ftol': 1e-6}  # Increased precision
@@ -422,10 +422,15 @@ class PlatformController:
         
         return optimized_position, optimized_rotation
 
-    def optimize_offsets(self, trajectory_df: pd.DataFrame, num_cores: int = None) -> Tuple[np.ndarray, np.ndarray]:
+    def optimize_offsets(self, trajectory_df: pd.DataFrame, file_path: str, num_cores: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Optimize position and rotation offsets with feasibility tracking
         """
+        # Add debug print at the start of optimize_offsets
+        print("Entering optimize_offsets...")
+        print(f"Trajectory DataFrame shape: {trajectory_df.shape}")
+        print(f"Number of CPU cores: {num_cores}")
+
         if num_cores is None:
             num_cores = mp.cpu_count()
 
@@ -473,10 +478,13 @@ class PlatformController:
         best_score = float('inf')
         feasible_solutions_found = 0
         
+        # Add debug print before submitting optimization tasks
+        print("Submitting optimization tasks...")
+
         # Run optimizations in parallel
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
             futures = [
-                executor.submit(optimize_with_initial_guess, x0, bounds, trajectory_df, self)
+                executor.submit(optimize_with_initial_guess, x0, bounds, trajectory_df, self, file_path)
                 for x0 in initial_guesses
             ]
             
@@ -505,6 +513,14 @@ class PlatformController:
                 except Exception as e:
                     print(f"\nOptimization attempt failed: {str(e)}")
                     continue
+
+        # Add debug print after optimization completes
+        print("Optimization tasks completed.")
+        print(f"Feasible solutions found: {feasible_solutions_found}")
+        if best_result:
+            print(f"Best result score: {best_result['fun']}")
+        else:
+            print("No valid results found.")
         
         print(f"\nOptimization complete:")
         print(f"  Feasible solutions found: {feasible_solutions_found}")
@@ -531,7 +547,7 @@ class PlatformController:
                 return np.zeros(3), np.zeros(3)
             return best_result['x'][:3], best_result['x'][3:]  # Access dictionary properly
 
-    def objective_function(self, params: np.ndarray, trajectory_df: pd.DataFrame) -> float:
+    def objective_function(self, params: np.ndarray, trajectory_df: pd.DataFrame, file_path: str) -> float:
         """
         Objective function for optimization that strongly prefers feasible solutions.
         Includes scaled penalties for out-of-bounds positions and tracks feasible solutions.
@@ -539,10 +555,22 @@ class PlatformController:
         Args:
             params: Array of [x_offset, y_offset, z_offset, roll_offset, pitch_offset, yaw_offset]
             trajectory_df: DataFrame with trajectory data
+            file_path: Path to the input Excel file
             
         Returns:
             float: Objective value (lower is better)
         """
+        # Add debug print at the very start of the function
+        print("Entering objective_function...")
+
+        # Add debug print to check params and trajectory_df
+        print(f"Params: {params}")
+        print(f"Trajectory DataFrame shape: {trajectory_df.shape}")
+
+        # Add debug print to confirm offsets
+        print(f"Initial position offset: {self.position_offset}")
+        print(f"Initial rotation offset: {self.rotation_offset}")
+
         pos_offset = params[:3]
         rot_offset = params[3:]
         
@@ -550,129 +578,145 @@ class PlatformController:
         orig_pos_offset = self.position_offset.copy()
         orig_rot_offset = self.rotation_offset.copy()
         
-        # Set new offsets
-        self.position_offset = pos_offset
-        self.rotation_offset = rot_offset
-        
-        try:
-            unreachable_count = 0
-            total_error = 0
-            out_of_bounds_count = 0
-            max_out_of_bounds = 0
-            all_positions_feasible = True
+        # Add initial debug print to trace execution
+        print("Starting objective_function execution...")
+        print(f"Parameters received: {params}")
+        print(f"Trajectory DataFrame head: {trajectory_df.head()}")
 
-            # Process each point in the trajectory
-            prev_slider_positions = None
-            for _, row in trajectory_df.iterrows():
-                try:
-                    # Apply offsets with explicit z-position non-negative constraint
-                    position = np.array([
-                        row['x'] + pos_offset[0],
-                        row['y'] + pos_offset[1],
-                        max(0, row['z'] + pos_offset[2])  # Force z position to be non-negative
-                    ])
-                    
-                    # Add large penalty for attempted negative z positions
-                    if row['z'] + pos_offset[2] < 0:
-                        total_error += 1e6  # Large penalty
+        # Define the input file name for debug log suffix
+        input_file_name = os.path.basename(file_path).replace('.xlsx', '')
+        print(f"Input file name extracted: {input_file_name}")
+
+        # Define the directory for saving debug logs
+        debug_log_dir = os.path.join(os.getcwd(), "platform_control")
+        os.makedirs(debug_log_dir, exist_ok=True)  # Ensure the directory exists
+        print(f"Debug log directory ensured: {debug_log_dir}")
+
+        # Update the debug log file path to include the directory
+        log_file_path = os.path.join(debug_log_dir, f"debug_log_{input_file_name}.txt")
+        print(f"Debug log file path set: {log_file_path}")
+
+        # Add logging to confirm debug log creation
+        print(f"Debug log directory: {debug_log_dir}")
+        print(f"Debug log file path: {log_file_path}")
+
+        with open(log_file_path, "w") as log_file:
+            print(f"Writing debug log to: {log_file_path}")
+            log_file.write("\n=== Debug: Objective Function ===\n")
+            log_file.write(f"Position Offset: {pos_offset}\n")
+            log_file.write(f"Rotation Offset: {rot_offset}\n")
+
+            try:
+                unreachable_count = 0
+                out_of_bounds_count = 0
+                max_out_of_bounds = 0
+                all_positions_feasible = True
+
+                # Debugging: Log intermediate results
+                log_file.write("\n=== Debug: Objective Function ===\n")
+                log_file.write(f"Position Offset: {pos_offset}\n")
+                log_file.write(f"Rotation Offset: {rot_offset}\n")
+
+                # Process each point in the trajectory
+                prev_slider_positions = None
+                for index, row in trajectory_df.iterrows():
+                    try:
+                        # Apply offsets with explicit z-position non-negative constraint
+                        position = np.array([
+                            row['x'] + pos_offset[0],
+                            row['y'] + pos_offset[1],
+                            max(0, row['z'] + pos_offset[2])  # Force z position to be non-negative
+                        ])
+
+                        angles = np.array([
+                            row['roll'] + rot_offset[0],
+                            row['pitch'] + rot_offset[1],
+                            row['yaw'] + rot_offset[2]
+                        ])
+
+                        # Debugging: Log position and angles
+                        log_file.write(f"\nTrajectory Point {index}:\n")
+                        log_file.write(f"  Position: {position}\n")
+                        log_file.write(f"  Angles: {angles}\n")
+
+                        # Calculate platform points
+                        roll, pitch, yaw = np.radians(angles)
+                        Rx = np.array([[1, 0, 0],
+                                    [0, np.cos(roll), -np.sin(roll)],
+                                    [0, np.sin(roll), np.cos(roll)]]);
+                        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                                    [0, 1, 0],
+                                    [-np.sin(pitch), 0, np.cos(pitch)]]);
+                        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                                    [np.sin(yaw), np.cos(yaw), 0],
+                                    [0, 0, 1]]);
+                        rotation = Rz @ Ry @ Rx
+
+                        platform_points = self.transform_platform_points(position, rotation)
+
+                        # Try to calculate slider positions
+                        slider_positions, _, _ = self.calculate_slider_positions(
+                            platform_points,
+                            platform_pos=position,
+                            platform_rot=angles,
+                            debug=False
+                        )
+
+                        # Debugging: Log slider positions
+                        log_file.write(f"  Slider Positions: {slider_positions}\n")
+
+                        # Check bounds violations and calculate penalties
+                        for pos in slider_positions:
+                            if pos < 0:
+                                violation = abs(pos)
+                                out_of_bounds_count += 1
+                                max_out_of_bounds = max(max_out_of_bounds, violation)
+                                all_positions_feasible = False
+                            elif pos > self.rail_max_travel:
+                                violation = pos - self.rail_max_travel
+                                out_of_bounds_count += 1
+                                max_out_of_bounds = max(max_out_of_bounds, violation)
+                                all_positions_feasible = False
+
+                        # Add penalty for large accelerations
+                        if prev_slider_positions is not None:
+                            accelerations = (slider_positions - prev_slider_positions) / trajectory_df['time'].diff().iloc[1]
+                            acceleration_penalty = np.sum(np.abs(accelerations) ** 2) * 1000  # Quadratic penalty
+
+                            # Debugging: Log accelerations and penalty
+                            log_file.write(f"  Accelerations: {accelerations}\n")
+                            log_file.write(f"  Acceleration Penalty: {acceleration_penalty}\n")
+
+                        prev_slider_positions = slider_positions
+
+                        # Add regular movement cost (with reduced weight)
+                        movement_cost = np.sum(np.abs(slider_positions)) * 0.01
+
+                        # Debugging: Log movement cost
+                        log_file.write(f"  Movement Cost: {movement_cost}\n")
+
+                    except Exception as e:
+                        unreachable_count += 1
                         all_positions_feasible = False
-                    
-                    angles = np.array([
-                        row['roll'] + rot_offset[0],
-                        row['pitch'] + rot_offset[1],
-                        row['yaw'] + rot_offset[2]
-                    ])
-
-                    # Calculate platform points
-                    roll, pitch, yaw = np.radians(angles)
-                    Rx = np.array([[1, 0, 0],
-                                [0, np.cos(roll), -np.sin(roll)],
-                                [0, np.sin(roll), np.cos(roll)]])
-                    Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
-                                [0, 1, 0],
-                                [-np.sin(pitch), 0, np.cos(pitch)]])
-                    Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                                [np.sin(yaw), np.cos(yaw), 0],
-                                [0, 0, 1]])
-                    rotation = Rz @ Ry @ Rx
-
-                    platform_points = self.transform_platform_points(position, rotation)
-
-                    # Try to calculate slider positions
-                    slider_positions, _, _ = self.calculate_slider_positions(
-                        platform_points,
-                        platform_pos=position,
-                        platform_rot=angles,
-                        debug=False
-                    )
-
-                    # Check bounds violations and calculate penalties
-                    for pos in slider_positions:
-                        if pos < 0:
-                            violation = abs(pos)
-                            out_of_bounds_count += 1
-                            max_out_of_bounds = max(max_out_of_bounds, violation)
-                            all_positions_feasible = False
-                        elif pos > self.rail_max_travel:
-                            violation = pos - self.rail_max_travel
-                            out_of_bounds_count += 1
-                            max_out_of_bounds = max(max_out_of_bounds, violation)
-                            all_positions_feasible = False
-
-                    # Add penalty for large accelerations
-                    if prev_slider_positions is not None:
-                        accelerations = (slider_positions - prev_slider_positions) / trajectory_df['time'].diff().iloc[1]
-                        acceleration_penalty = np.sum(np.abs(accelerations) ** 2) * 1000  # Quadratic penalty
-                        total_error += acceleration_penalty
-
-                    prev_slider_positions = slider_positions
-
-                    # Add regular movement cost (with reduced weight)
-                    total_error += np.sum(np.abs(slider_positions)) * 0.01
-
-                except Exception:
-                    unreachable_count += 1
-                    all_positions_feasible = False
-                    total_error += 10000  # Increased penalty for unreachable points
-            
-            # Calculate final score with extreme preference for feasible solutions
-            if unreachable_count > 0 or out_of_bounds_count > 0:
-                # Apply scaled penalties for violations
-                bounds_penalty = 0
-                if out_of_bounds_count > 0:
-                    # Exponential penalty based on violation magnitude
-                    bounds_penalty = 1000 * (max_out_of_bounds ** 2) * out_of_bounds_count
-                
-                score = (
-                    total_error +  # Base movement cost
-                    bounds_penalty +  # Scaled penalty for out-of-bounds
-                    (unreachable_count * 50000) +  # Heavy penalty for unreachable points
-                    (out_of_bounds_count * 5000)  # Additional penalty per out-of-bounds position
-                )
-            else:
-                # Solution is completely feasible, use only movement cost
-                score = total_error
-                
-                # Store this feasible solution if it's the best so far
-                if not hasattr(self, 'best_feasible_solution') or score < self.best_feasible_solution['score']:
-                    self.best_feasible_solution = {
-                        'score': score,
-                        'position_offset': pos_offset.copy(),
-                        'rotation_offset': rot_offset.copy(),
-                        'max_out_of_bounds': 0,
-                        'out_of_bounds_count': 0,
-                        'unreachable_count': 0
-                    }
-            
-            return score
-            
-        except Exception:
-            return float('inf')
+                        log_file.write(f"  Error at Trajectory Point {index}: {e}\n")
         
-        finally:
-            # Restore original offsets
-            self.position_offset = orig_pos_offset
-            self.rotation_offset = orig_rot_offset
+
+                with open(log_file_path, "w") as log_file:
+                    log_file.write(final_statistics)
+                    log_file.write("\n=== Debug: Objective Function ===\n")
+                    log_file.write(f"Position Offset: {pos_offset}\n")
+                    log_file.write(f"Rotation Offset: {rot_offset}\n")
+
+                return 0
+
+            except Exception as e:
+                log_file.write(f"Error in objective function: {e}\n")
+                return float('inf')
+
+            finally:
+                # Restore original offsets
+                self.position_offset = orig_pos_offset
+                self.rotation_offset = orig_rot_offset
 
     def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True) -> pd.DataFrame:
         """
@@ -819,101 +863,106 @@ class PlatformController:
 
     def export_results_to_excel(self, results_df: pd.DataFrame, output_file: str):
         """Export results to Excel file"""
-        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            # Main results sheet with added angles
-            main_results = pd.DataFrame({
-                'Time (s)': results_df['time'],
-                'Slider 1 (m)': results_df['slider1'],
-                'Slider 2 (m)': results_df['slider2'],
-                'Slider 3 (m)': results_df['slider3'],
-                'Motor Angle (deg)': results_df['motor_angle'],
-                'Platform X (m)': results_df['x'],
-                'Platform Y (m)': results_df['y'],
-                'Platform Z (m)': results_df['z'],
-                'Roll (deg)': results_df['roll'],
-                'Pitch (deg)': results_df['pitch'],
-                'Yaw (deg)': results_df['yaw']
-            })
-            main_results.to_excel(writer, sheet_name='Positions', index=False)
-            
-            # Velocities sheet
-            velocities = pd.DataFrame({
-                'Time (s)': results_df['time'],
-                'Slider 1 (m/s)': results_df['velocity1'],
-                'Slider 2 (m/s)': results_df['velocity2'],
-                'Slider 3 (m/s)': results_df['velocity3']
-            })
-            velocities.to_excel(writer, sheet_name='Velocities', index=False)
-            
-            # Accelerations sheet
-            accelerations = pd.DataFrame({
-                'Time (s)': results_df['time'],
-                'Slider 1 (m/s²)': results_df['acceleration1'],
-                'Slider 2 (m/s²)': results_df['acceleration2'],
-                'Slider 3 (m/s²)': results_df['acceleration3']
-            })
-            accelerations.to_excel(writer, sheet_name='Accelerations', index=False)
-            
-            # Statistics sheet with expanded metrics
-            stats = pd.DataFrame({
-                'Metric': [
-                    'Peak Velocity (m/s)',
-                    'Peak Acceleration (m/s²)',
-                    'Max Slider 1 Position (m)',
-                    'Max Slider 2 Position (m)',
-                    'Max Slider 3 Position (m)',
-                    'Min Slider 1 Position (m)',
-                    'Min Slider 2 Position (m)',
-                    'Min Slider 3 Position (m)',
-                    'Slider 1 Range (m)',
-                    'Slider 2 Range (m)',
-                    'Slider 3 Range (m)',
-                    'Position Offset X (m)',
-                    'Position Offset Y (m)',
-                    'Position Offset Z (m)',
-                    'Rotation Offset Roll (deg)',
-                    'Rotation Offset Pitch (deg)',
-                    'Rotation Offset Yaw (deg)',
-                    'Platform X Range (m)',
-                    'Platform Y Range (m)',
-                    'Platform Z Range (m)',
-                    'Roll Range (deg)',
-                    'Pitch Range (deg)',
-                    'Yaw Range (deg)',
-                    'Total Points',
-                    'Unreachable Points',
-                    'Success Rate (%)'
-                ],
-                'Value': [
-                    np.max([np.abs(results_df['velocity1'].max()), np.abs(results_df['velocity2'].max()), np.abs(results_df['velocity3'].max())]),
-                    np.max([np.abs(results_df['acceleration1'].max()), np.abs(results_df['acceleration2'].max()), np.abs(results_df['acceleration3'].max())]),
-                    results_df['slider1'].max(),
-                    results_df['slider2'].max(),
-                    results_df['slider3'].max(),
-                    results_df['slider1'].min(),
-                    results_df['slider2'].min(),
-                    results_df['slider3'].min(),
-                    results_df['slider1'].max() - results_df['slider1'].min(),
-                    results_df['slider2'].max() - results_df['slider2'].min(),
-                    results_df['slider3'].max() - results_df['slider3'].min(),
-                    self.position_offset[0],  # Correctly display optimized position offset X
-                    self.position_offset[1],  # Correctly display optimized position offset Y
-                    self.position_offset[2],  # Correctly display optimized position offset Z
-                    self.rotation_offset[0],  # Correctly display optimized rotation offset Roll
-                    self.rotation_offset[1],  # Correctly display optimized rotation offset Pitch
-                    self.rotation_offset[2],  # Correctly display optimized rotation offset Yaw
-                    results_df['x'].max() - results_df['x'].min(),
-                    results_df['y'].max() - results_df['y'].min(),
-                    results_df['z'].max() - results_df['z'].min(),
-                    results_df['roll'].max() - results_df['roll'].min(),
-                    results_df['pitch'].max() - results_df['pitch'].min(),
-                    results_df['yaw'].max() - results_df['yaw'].min(),
-                    len(results_df),
-                    0,  # Placeholder for unreachable points
-                    100.0  # Placeholder for success rate
-                ]
-            })
-            stats.to_excel(writer, sheet_name='Statistics', index=False)
+        try:
+            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                # Main results sheet with added angles
+                main_results = pd.DataFrame({
+                    'Time (s)': results_df['time'],
+                    'Slider 1 (m)': results_df['slider1'],
+                    'Slider 2 (m)': results_df['slider2'],
+                    'Slider 3 (m)': results_df['slider3'],
+                    'Motor Angle (deg)': results_df['motor_angle'],
+                    'Platform X (m)': results_df['x'],
+                    'Platform Y (m)': results_df['y'],
+                    'Platform Z (m)': results_df['z'],
+                    'Roll (deg)': results_df['roll'],
+                    'Pitch (deg)': results_df['pitch'],
+                    'Yaw (deg)': results_df['yaw']
+                })
+                main_results.to_excel(writer, sheet_name='Positions', index=False)
+
+                # Velocities sheet
+                velocities = pd.DataFrame({
+                    'Time (s)': results_df['time'],
+                    'Slider 1 (m/s)': results_df['velocity1'],
+                    'Slider 2 (m/s)': results_df['velocity2'],
+                    'Slider 3 (m/s)': results_df['velocity3']
+                })
+                velocities.to_excel(writer, sheet_name='Velocities', index=False)
+
+                # Accelerations sheet
+                accelerations = pd.DataFrame({
+                    'Time (s)': results_df['time'],
+                    'Slider 1 (m/s²)': results_df['acceleration1'],
+                    'Slider 2 (m/s²)': results_df['acceleration2'],
+                    'Slider 3 (m/s²)': results_df['acceleration3']
+                })
+                accelerations.to_excel(writer, sheet_name='Accelerations', index=False)
+
+                # Statistics sheet with expanded metrics
+                stats = pd.DataFrame({
+                    'Metric': [
+                        'Peak Velocity (m/s)',
+                        'Peak Acceleration (m/s²)',
+                        'Max Slider 1 Position (m)',
+                        'Max Slider 2 Position (m)',
+                        'Max Slider 3 Position (m)',
+                        'Min Slider 1 Position (m)',
+                        'Min Slider 2 Position (m)',
+                        'Min Slider 3 Position (m)',
+                        'Slider 1 Range (m)',
+                        'Slider 2 Range (m)',
+                        'Slider 3 Range (m)',
+                        'Position Offset X (m)',
+                        'Position Offset Y (m)',
+                        'Position Offset Z (m)',
+                        'Rotation Offset Roll (deg)',
+                        'Rotation Offset Pitch (deg)',
+                        'Rotation Offset Yaw (deg)',
+                        'Platform X Range (m)',
+                        'Platform Y Range (m)',
+                        'Platform Z Range (m)',
+                        'Roll Range (deg)',
+                        'Pitch Range (deg)',
+                        'Yaw Range (deg)',
+                        'Total Points',
+                        'Unreachable Points',
+                        'Success Rate (%)'
+                    ],
+                    'Value': [
+                        np.max([np.abs(results_df['velocity1'].max()), np.abs(results_df['velocity2'].max()), np.abs(results_df['velocity3'].max())]),
+                        np.max([np.abs(results_df['acceleration1'].max()), np.abs(results_df['acceleration2'].max()), np.abs(results_df['acceleration3'].max())]),
+                        results_df['slider1'].max(),
+                        results_df['slider2'].max(),
+                        results_df['slider3'].max(),
+                        results_df['slider1'].min(),
+                        results_df['slider2'].min(),
+                        results_df['slider3'].min(),
+                        results_df['slider1'].max() - results_df['slider1'].min(),
+                        results_df['slider2'].max() - results_df['slider2'].min(),
+                        results_df['slider3'].max() - results_df['slider3'].min(),
+                        self.position_offset[0],
+                        self.position_offset[1],
+                        self.position_offset[2],
+                        self.rotation_offset[0],
+                        self.rotation_offset[1],
+                        self.rotation_offset[2],
+                        results_df['x'].max() - results_df['x'].min(),
+                        results_df['y'].max() - results_df['y'].min(),
+                        results_df['z'].max() - results_df['z'].min(),
+                        results_df['roll'].max() - results_df['roll'].min(),
+                        results_df['pitch'].max() - results_df['pitch'].min(),
+                        results_df['yaw'].max() - results_df['yaw'].min(),
+                        len(results_df),
+                        0,  # Placeholder for unreachable points
+                        100.0  # Placeholder for success rate
+                    ]
+                })
+                stats.to_excel(writer, sheet_name='Statistics', index=False)
+
+            print(f"Results successfully exported to {output_file}")
+        except Exception as e:
+            print(f"Error exporting results to Excel: {e}")
 
     def plot_results(self, results_df: pd.DataFrame):
         """Plot the trajectory results"""
@@ -1035,7 +1084,7 @@ def main():
     
     print("\nOptimizing trajectory offsets...")
     # Optimize offsets
-    pos_offset, rot_offset = controller.optimize_offsets(trajectory_df)
+    pos_offset, rot_offset = controller.optimize_offsets(trajectory_df, file_path)
     
     # Set optimized offsets
     controller.position_offset = pos_offset

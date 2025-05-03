@@ -11,6 +11,8 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from functools import partial
 import threading
+from multiprocessing import Value
+
 
 # Thread-safe progress bar
 class ThreadSafeCounter:
@@ -22,6 +24,9 @@ class ThreadSafeCounter:
         with self.lock:
             self.value += 1
             return self.value
+
+# Initialize the attempt_counter as a multiprocessing.Value
+attempt_counter = Value('i', 0)  # 'i' indicates an integer value
 
 def chunk_data(data: pd.DataFrame, num_chunks: int) -> List[pd.DataFrame]:
     """Split data into optimal chunk sizes for parallel processing"""
@@ -62,13 +67,14 @@ def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]
         }
 
 class PlatformController:
-    def __init__(self, leg_length: float, rail_max_travel: float):
+    def __init__(self, leg_length: float, rail_max_travel: float, log_file_path: str):
         """
         Initialize the platform controller with geometric parameters
         
         Args:
             leg_length: Length of each leg in meters
             rail_max_travel: Maximum travel distance of each slider in meters
+            log_file_path: Path to the debug log file
         """
         self.leg_length = leg_length
         self.rail_max_travel = rail_max_travel
@@ -103,6 +109,8 @@ class PlatformController:
             np.array([self.PLATFORM_RADIUS*np.cos(2*np.pi/3), self.PLATFORM_RADIUS*np.sin(2*np.pi/3), 0.0]),
             np.array([self.PLATFORM_RADIUS*np.cos(4*np.pi/3), self.PLATFORM_RADIUS*np.sin(4*np.pi/3), 0.0])
         ]
+
+        self.log_file_path = log_file_path
 
     def transform_platform_points(self, position: np.ndarray, rotation: np.ndarray) -> List[np.ndarray]:
         """
@@ -547,7 +555,7 @@ class PlatformController:
                 return np.zeros(3), np.zeros(3)
             return best_result['x'][:3], best_result['x'][3:]  # Access dictionary properly
 
-    def objective_function(self, params: np.ndarray, trajectory_df: pd.DataFrame, file_path: str) -> float:
+    def objective_function(self, params: np.ndarray, trajectory_df: pd.DataFrame) -> float:
         """
         Objective function for optimization that strongly prefers feasible solutions.
         Includes scaled penalties for out-of-bounds positions and tracks feasible solutions.
@@ -577,146 +585,127 @@ class PlatformController:
         # Store original offsets
         orig_pos_offset = self.position_offset.copy()
         orig_rot_offset = self.rotation_offset.copy()
-        
+
         # Add initial debug print to trace execution
         print("Starting objective_function execution...")
-        print(f"Parameters received: {params}")
-        print(f"Trajectory DataFrame head: {trajectory_df.head()}")
 
-        # Define the input file name for debug log suffix
-        input_file_name = os.path.basename(file_path).replace('.xlsx', '')
-        print(f"Input file name extracted: {input_file_name}")
+        try:
+            total_error = 0
+            unreachable_count = 0
+            out_of_bounds_count = 0
+            max_out_of_bounds = 0
 
-        # Define the directory for saving debug logs
-        debug_log_dir = os.path.join(os.getcwd(), "platform_control")
-        os.makedirs(debug_log_dir, exist_ok=True)  # Ensure the directory exists
-        print(f"Debug log directory ensured: {debug_log_dir}")
+            # # Use the shared counter for attempt_number
+            # with attempt_counter.get_lock():
+            #     attempt_number = attempt_counter.value
+            #     attempt_counter.value += 1
+            #     print(f"Attempt number: {attempt_number}")
 
-        # Update the debug log file path to include the directory
-        log_file_path = os.path.join(debug_log_dir, f"debug_log_{input_file_name}.txt")
-        print(f"Debug log file path set: {log_file_path}")
+            # Process each point in the trajectory
+            for _, row in trajectory_df.iterrows():
+                try:
+                    # Apply offsets
+                    position = np.array([
+                        row['x'] + pos_offset[0],
+                        row['y'] + pos_offset[1],
+                        row['z'] + pos_offset[2]
+                    ])
+                    angles = np.array([
+                        row['roll'] + rot_offset[0],
+                        row['pitch'] + rot_offset[1],
+                        row['yaw'] + rot_offset[2]
+                    ])
+                    
+                    # Create rotation matrix and calculate platform points
+                    roll, pitch, yaw = np.radians(angles)
+                    Rx = np.array([[1, 0, 0],
+                                [0, np.cos(roll), -np.sin(roll)],
+                                [0, np.sin(roll), np.cos(roll)]])
+                    Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                                [0, 1, 0],
+                                [-np.sin(pitch), 0, np.cos(pitch)]])
+                    Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                                [np.sin(yaw), np.cos(yaw), 0],
+                                [0, 0, 1]])
+                    rotation = Rz @ Ry @ Rx
+                    
+                    platform_points = self.transform_platform_points(position, rotation)
+                    
+                    # Try to calculate slider positions
+                    slider_positions, _, _ = self.calculate_slider_positions(
+                        platform_points,
+                        platform_pos=position,
+                        platform_rot=angles,
+                        debug=False
+                    )
+                    
+                    # Check bounds and calculate penalties
+                    for pos in slider_positions:
+                        if pos < 0:
+                            out_of_bounds_count += 1
+                            max_out_of_bounds = max(max_out_of_bounds, abs(pos))
+                        elif pos > self.rail_max_travel:
+                            out_of_bounds_count += 1
+                            max_out_of_bounds = max(max_out_of_bounds, pos - self.rail_max_travel)
+                    
+                    # Add movement cost (only if point is reachable)
+                    total_error += np.sum(np.abs(slider_positions)) * 0.01
+                    
+                except Exception:
+                    unreachable_count += 1
+            
+            # Calculate score with extreme preference for feasible solutions
+            if unreachable_count > 0 or out_of_bounds_count > 0:
+                score = 1e6 + (unreachable_count * 1e4) + (out_of_bounds_count * 1e3) + (max_out_of_bounds * 1e2)
+            else:
+                # Solution is completely feasible, use only movement cost
+                score = total_error
+                
+                # Store this feasible solution if it's the best so far
+                if not hasattr(self, 'best_feasible_solution') or score < self.best_feasible_solution['score']:
+                    self.best_feasible_solution = {
+                        'score': score,
+                        'position_offset': pos_offset.copy(),
+                        'rotation_offset': rot_offset.copy()
+                    }
+            
+            # # Ensure slider_positions is a NumPy array
+            # slider_positions = np.array(slider_positions)
+            # dt = trajectory_df['time'].diff().iloc[1]
 
-        # Add logging to confirm debug log creation
-        print(f"Debug log directory: {debug_log_dir}")
-        print(f"Debug log file path: {log_file_path}")
+            # # Calculate velocities
+            # if len(slider_positions) > 1 and dt > 0:
+            #     velocities = np.diff(slider_positions) / dt
+            #     peak_velocity = max(np.abs(velocities)) if len(velocities) > 0 else 0
 
-        with open(log_file_path, "w") as log_file:
-            print(f"Writing debug log to: {log_file_path}")
-            log_file.write("\n=== Debug: Objective Function ===\n")
-            log_file.write(f"Position Offset: {pos_offset}\n")
-            log_file.write(f"Rotation Offset: {rot_offset}\n")
+            #     # Calculate accelerations
+            #     if len(velocities) > 1:
+            #         accelerations = np.diff(velocities) / dt
+            #         peak_acceleration = max(np.abs(accelerations)) if len(accelerations) > 0 else 0
+            #     else:
+            #         peak_acceleration = 0
+            # else:
+            #     velocities = np.zeros(1)
+            #     peak_velocity = 0
+            #     peak_acceleration = 0
 
-            try:
-                unreachable_count = 0
-                out_of_bounds_count = 0
-                max_out_of_bounds = 0
-                all_positions_feasible = True
 
-                # Debugging: Log intermediate results
-                log_file.write("\n=== Debug: Objective Function ===\n")
-                log_file.write(f"Position Offset: {pos_offset}\n")
-                log_file.write(f"Rotation Offset: {rot_offset}\n")
+            # # Log each optimization attempt to a debug file with additional metrics
+            # with open(self.log_file_path, "a") as debug_file:
+            #     debug_file.write(f"Attempt: {attempt_number}, Score: {score}, Position Offset: {pos_offset}, Rotation Offset: {rot_offset}, Peak Velocity: {peak_velocity}, Peak Acceleration: {peak_acceleration}\n")
+  
+            print("TRY LOOP RAN")    
 
-                # Process each point in the trajectory
-                prev_slider_positions = None
-                for index, row in trajectory_df.iterrows():
-                    try:
-                        # Apply offsets with explicit z-position non-negative constraint
-                        position = np.array([
-                            row['x'] + pos_offset[0],
-                            row['y'] + pos_offset[1],
-                            max(0, row['z'] + pos_offset[2])  # Force z position to be non-negative
-                        ])
-
-                        angles = np.array([
-                            row['roll'] + rot_offset[0],
-                            row['pitch'] + rot_offset[1],
-                            row['yaw'] + rot_offset[2]
-                        ])
-
-                        # Debugging: Log position and angles
-                        log_file.write(f"\nTrajectory Point {index}:\n")
-                        log_file.write(f"  Position: {position}\n")
-                        log_file.write(f"  Angles: {angles}\n")
-
-                        # Calculate platform points
-                        roll, pitch, yaw = np.radians(angles)
-                        Rx = np.array([[1, 0, 0],
-                                    [0, np.cos(roll), -np.sin(roll)],
-                                    [0, np.sin(roll), np.cos(roll)]]);
-                        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
-                                    [0, 1, 0],
-                                    [-np.sin(pitch), 0, np.cos(pitch)]]);
-                        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                                    [np.sin(yaw), np.cos(yaw), 0],
-                                    [0, 0, 1]]);
-                        rotation = Rz @ Ry @ Rx
-
-                        platform_points = self.transform_platform_points(position, rotation)
-
-                        # Try to calculate slider positions
-                        slider_positions, _, _ = self.calculate_slider_positions(
-                            platform_points,
-                            platform_pos=position,
-                            platform_rot=angles,
-                            debug=False
-                        )
-
-                        # Debugging: Log slider positions
-                        log_file.write(f"  Slider Positions: {slider_positions}\n")
-
-                        # Check bounds violations and calculate penalties
-                        for pos in slider_positions:
-                            if pos < 0:
-                                violation = abs(pos)
-                                out_of_bounds_count += 1
-                                max_out_of_bounds = max(max_out_of_bounds, violation)
-                                all_positions_feasible = False
-                            elif pos > self.rail_max_travel:
-                                violation = pos - self.rail_max_travel
-                                out_of_bounds_count += 1
-                                max_out_of_bounds = max(max_out_of_bounds, violation)
-                                all_positions_feasible = False
-
-                        # Add penalty for large accelerations
-                        if prev_slider_positions is not None:
-                            accelerations = (slider_positions - prev_slider_positions) / trajectory_df['time'].diff().iloc[1]
-                            acceleration_penalty = np.sum(np.abs(accelerations) ** 2) * 1000  # Quadratic penalty
-
-                            # Debugging: Log accelerations and penalty
-                            log_file.write(f"  Accelerations: {accelerations}\n")
-                            log_file.write(f"  Acceleration Penalty: {acceleration_penalty}\n")
-
-                        prev_slider_positions = slider_positions
-
-                        # Add regular movement cost (with reduced weight)
-                        movement_cost = np.sum(np.abs(slider_positions)) * 0.01
-
-                        # Debugging: Log movement cost
-                        log_file.write(f"  Movement Cost: {movement_cost}\n")
-
-                    except Exception as e:
-                        unreachable_count += 1
-                        all_positions_feasible = False
-                        log_file.write(f"  Error at Trajectory Point {index}: {e}\n")
+            return score
+                        
+        except Exception as e:
+            print(f"Error in objective_function: {e}")
+            return float('inf')
         
-
-                with open(log_file_path, "w") as log_file:
-                    log_file.write(final_statistics)
-                    log_file.write("\n=== Debug: Objective Function ===\n")
-                    log_file.write(f"Position Offset: {pos_offset}\n")
-                    log_file.write(f"Rotation Offset: {rot_offset}\n")
-
-                return 0
-
-            except Exception as e:
-                log_file.write(f"Error in objective function: {e}\n")
-                return float('inf')
-
-            finally:
-                # Restore original offsets
-                self.position_offset = orig_pos_offset
-                self.rotation_offset = orig_rot_offset
+        finally:
+            # Restore original offsets
+            self.position_offset = orig_pos_offset
+            self.rotation_offset = orig_rot_offset
 
     def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True) -> pd.DataFrame:
         """
@@ -832,6 +821,7 @@ class PlatformController:
                 prev_sliders = slider_positions
 
             except ValueError as e:
+                print(f"Error processing row: {e}")
                 continue
 
         # Sort results by time
@@ -1042,6 +1032,29 @@ def main():
         except Exception as e:
             print(f"Error: {str(e)}")
     
+    # Ensure debug log directory and file path setup
+    debug_log_dir = os.path.join(os.getcwd(), "platform_control")
+    os.makedirs(debug_log_dir, exist_ok=True)  # Ensure the directory exists
+    print(f"Debug log directory ensured: {debug_log_dir}")
+
+    # Define the input file name for debug log suffix
+    input_file_name = os.path.basename(file_path).replace('.xlsx', '')
+
+    # Define the debug log file path
+    log_file_path = os.path.join(debug_log_dir, f"debug_log_{input_file_name}.txt")
+    print(f"Debug log file path set: {log_file_path}")
+
+    # Create the debug log file to ensure it exists
+    try:
+        if not os.path.exists(log_file_path):
+            with open(log_file_path, "w") as debug_file:
+                debug_file.write("Debug log initialized.\n")
+            print(f"Debug log file created: {log_file_path}")
+        else:
+            print(f"Debug log file already exists: {log_file_path}")
+    except Exception as e:
+        print(f"Failed to create debug log file: {e}")
+
     # Get geometric parameters from user
     while True:
         try:
@@ -1062,7 +1075,7 @@ def main():
             print("Please enter a valid positive number")
     
     # Create controller with specified parameters
-    controller = PlatformController(leg_length, rail_max_travel)
+    controller = PlatformController(leg_length, rail_max_travel, log_file_path)
     
     # First process trajectory without optimization
     print("\nProcessing trajectory without optimization...")

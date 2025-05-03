@@ -76,7 +76,7 @@ def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]
         }
 
 class PlatformController:
-    def __init__(self, leg_length: float, rail_max_travel: float, log_file_path: str):
+    def __init__(self, leg_length: float, rail_max_travel: float, log_file_path: str, log_attempts: bool = True):
         """
         Initialize the platform controller with geometric parameters
         
@@ -84,10 +84,12 @@ class PlatformController:
             leg_length: Length of each leg in meters
             rail_max_travel: Maximum travel distance of each slider in meters
             log_file_path: Path to the debug log file
+            log_attempts: Whether to log individual optimization attempts (default: True)
         """
         self.leg_length = leg_length
         self.rail_max_travel = rail_max_travel
         self.L_squared = leg_length * leg_length
+        self.log_attempts = log_attempts
         
         # Add offset parameters
         self.position_offset = np.zeros(3)  # [x, y, z] offsets
@@ -454,7 +456,7 @@ class PlatformController:
         if num_cores is None:
             num_cores = mp.cpu_count()
 
-        # Initialize best feasible solution tracker with velocity and acceleration tracking
+        # Initialize best feasible solution tracker
         self.best_feasible_solution = None
         best_result = None
         best_score = float('inf')
@@ -698,21 +700,19 @@ class PlatformController:
                         'peak_acceleration': peak_acceleration
                     }
 
-            # Get the attempt number from the counter
-            with attempt_counter.get_lock():
-                attempt_number = attempt_counter.value
-                attempt_counter.value += 1
+            if self.log_attempts:
+                # Get the attempt number from the counter
+                with attempt_counter.get_lock():
+                    attempt_number = attempt_counter.value
+                    attempt_counter.value += 1
 
             # Log each optimization attempt to a debug file with additional metrics
-            try:
-                with open(self.log_file_path, "a") as debug_file:
-                    debug_file.write(f"Attempt: {attempt_number}, Score: {score}, Position Offset: {pos_offset}, Rotation Offset: {rot_offset}, Peak Velocity: {peak_velocity}, Peak Acceleration: {peak_acceleration}\n")
-            except Exception as e:
-                print(f"Error writing to debug log: {e}")
+                try:
+                    with open(self.log_file_path, "a") as debug_file:
+                        debug_file.write(f"Attempt: {attempt_number}, Score: {score}, Position Offset: {pos_offset}, Rotation Offset: {rot_offset}, Peak Velocity: {peak_velocity}, Peak Acceleration: {peak_acceleration}\n")
+                except Exception as e:
+                    print(f"Error writing to debug log: {e}")
 
-            #print("TRY LOOP RAN")    
-            #print(f"Position offset: {pos_offset}")
-            #print(f"Score: {score:.3f}")
             return score
                         
         except Exception as e:
@@ -1136,8 +1136,11 @@ def main():
         except ValueError:
             print("Please enter a valid positive number")
     
+    # Ask if user wants to log optimization attempts
+    log_attempts = input("Log optimization attempts? (y/N): ").lower().strip() == 'y'
+    
     # Create controller with specified parameters
-    controller = PlatformController(leg_length, rail_max_travel, log_file_path)
+    controller = PlatformController(leg_length, rail_max_travel, log_file_path, log_attempts=log_attempts)
     
     # First process trajectory without optimization
     print("\nProcessing trajectory without optimization...")

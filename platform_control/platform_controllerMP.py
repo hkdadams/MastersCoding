@@ -1013,6 +1013,13 @@ class PlatformController:
                 stats.to_excel(writer, sheet_name='Statistics', index=False)
 
             print(f"Results successfully exported to {output_file}")
+        except PermissionError:
+            print(f"\nError: Cannot save results - the file '{output_file}' is currently open.")
+            print("Please close the Excel file and run the program again.")
+            return
+        except FileNotFoundError:
+            print(f"\nError: File '{output_file}' not found. Please check the file path.")
+            return
         except Exception as e:
             print(f"Error exporting results to Excel: {e}")
 

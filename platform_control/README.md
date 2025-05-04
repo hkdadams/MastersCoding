@@ -198,3 +198,86 @@ This script is designed for controlling and optimizing the motion of parallel ro
 ### Example Use Case
 - A user has a trajectory for a platform and wants to ensure that the platform can follow the trajectory without exceeding the physical limits of its actuators.
 - The script processes the trajectory, identifies infeasible points, and optimizes the platform's offsets to improve feasibility and efficiency.
+
+## Batch Processing and Size Optimization from `Batch_process_motions_size_optimise.py`
+
+The `Batch_process_motions_size_optimise.py` script provides automated processing of multiple motion files while optimizing the platform's physical dimensions (leg length and rail travel) for best performance.
+
+### Features
+- Batch processes multiple Excel files in parallel
+- Two-phase optimization strategy for leg lengths:
+  - Phase 1: Coarse search (0.2m to 0.75m in 0.1m steps)
+  - Phase 2: Fine-tuning (±0.1m around best coarse result in 0.05m steps)
+- Tests multiple rail lengths (0.5m, 0.6m, 0.75m)
+- Zeroing configuration options for each motion component
+- Comprehensive optimization metrics:
+  - Peak velocities and accelerations
+  - Movement efficiency score
+  - Improvement percentages
+- Detailed results export with statistics
+
+### Usage
+
+1. Run the script:
+   ```bash
+   python Batch_process_motions_size_optimise.py
+   ```
+
+2. When prompted:
+   - Enter the directory path containing Excel files (or press Enter for current directory)
+   - Choose which motion components to zero out (X, Y, Z translations and Roll, Pitch, Yaw rotations)
+
+3. The script will:
+   - Process each file in parallel
+   - Test multiple leg lengths and rail lengths
+   - Find the optimal configuration for each motion
+   - Generate a summary Excel file with results
+
+### Output
+
+The script generates a comprehensive Excel file named "leg_length_optimization_results.xlsx" containing:
+
+1. All Results sheet:
+   - File names
+   - Optimal rail and leg lengths
+   - Peak velocities and accelerations
+   - Improvement percentages
+   - Overall scores
+
+2. Statistics sheet:
+   - Average leg length
+   - Standard deviation
+   - Most common leg length
+   - Average velocity improvement
+   - Success rate
+
+3. Length Distribution sheet:
+   - Distribution of optimal leg lengths
+   - Frequency counts
+
+### Optimization Strategy
+
+The script uses a two-phase optimization approach:
+
+1. Coarse Phase:
+   - Tests leg lengths from 0.2m to 0.75m in 0.1m increments
+   - Identifies the most promising length range
+
+2. Fine-tuning Phase:
+   - Explores ±0.1m around the best coarse result
+   - Uses smaller 0.05m increments
+   - Finds the optimal configuration
+
+The optimization score combines:
+- Peak velocities
+- Peak accelerations
+- Movement efficiency
+- Feasibility constraints
+
+### Applications
+
+This script is particularly useful for:
+- Finding optimal platform dimensions for a set of motions
+- Batch processing multiple motion files
+- Comparing performance across different configurations
+- Generating statistical insights about optimal platform sizes

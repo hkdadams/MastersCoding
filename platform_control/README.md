@@ -48,26 +48,64 @@ Note: The program automatically converts time from milliseconds to seconds inter
 
 3. When prompted:
    - Enter the path to your Excel file
-   - Enter the leg length (or press Enter for default 0.5m)
+   - Enter the leg length (or press Enter for default 0.3m)
    - Enter the maximum rail travel (or press Enter for default 0.5m)
+   - Choose whether to log optimization attempts (y/N default No)
 
 4. The program will:
    - Load and validate the trajectory data
    - Convert time values from milliseconds to seconds
+   - Process trajectory without optimization (for comparison)
+   - Optimize platform position and rotation offsets
    - Calculate optimal slider positions and motor angles
    - Display peak velocities and accelerations
+   - Show improvement percentages compared to non-optimized motion
    - Show plots of slider positions, velocities, and accelerations
 
 ## Output
 
 The program generates:
 1. Console output showing:
-   - Data validation results
+   - Non-optimized results (initial position, orientation, peak velocities, and accelerations)
+   - Optimization progress and results
+   - Best feasible solution found
+   - Improvement percentages for velocity and acceleration reduction
    - Peak velocities and accelerations
-2. Three plots showing:
+2. Excel file containing:
+   - Positions sheet: Time-series data of slider positions and platform motion
+   - Velocities sheet: Calculated velocities for each slider
+   - Accelerations sheet: Calculated accelerations for each slider
+   - Statistics sheet: Comprehensive metrics including ranges and optimization results
+3. Debug log file (if logging enabled) containing:
+   - Detailed optimization attempts
+   - Score for each attempt
+   - Position and rotation offsets tried
+   - Peak velocities and accelerations
+   - Final optimization results summary
+4. Three plots showing:
    - Slider positions over time (in seconds)
    - Slider velocities over time
    - Slider accelerations over time
+
+## New Features and Improvements
+
+### Optimization Enhancements
+- Added option to enable/disable optimization attempt logging
+- Improved acceleration constraints (50 m/s² maximum)
+- Enhanced penalty system for exceeding velocity and acceleration limits
+- Better handling of infeasible solutions
+- Improved tracking of best feasible solution
+
+### File Handling
+- Better error handling for Excel file access
+- Clear message when Excel file is in use
+- Automatic debug log file creation and management
+- Structured output files with detailed statistics
+
+### Performance Optimization
+- Optional logging to reduce disk I/O during optimization
+- Improved parallel processing of optimization attempts
+- Better memory management for large trajectories
 
 ## Error Handling
 

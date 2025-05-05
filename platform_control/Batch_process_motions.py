@@ -1,24 +1,16 @@
-import sys
 import os
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-# Add the parent directory (MASTERS) to the Python path
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
-
-from Rugby_head_motions.process_kinematics import calculate_position_orientation
-from platform_controllerMP import PlatformController  # Using the MP version
+from platform_controllerMP import PlatformController
 
 def cleanup_memory():
-    """Perform memory cleanup to free resources"""
+    """Force garbage collection to free memory between files"""
     import gc
     gc.collect()
 
 def process_file(args):
-    """Process a single Excel file to calculate position and orientation"""
+    """Process a single Excel file with pre-processed position and orientation data"""
     file_path, leg_length, rail_max_travel, zero_config, enable_logging = args
     error_details = {}
     start_time = pd.Timestamp.now()
@@ -26,15 +18,6 @@ def process_file(args):
     trajectory_df = None
     
     try:
-        # Check if file is accessible
-        try:
-            with open(file_path, 'rb') as f:
-                pass
-        except PermissionError:
-            raise ValueError(f"Cannot access file - it may be open in Excel")
-        except Exception as e:
-            raise ValueError(f"File access error: {str(e)}")
-
         # Create output directory
         output_dir = os.path.join(os.path.dirname(file_path), "platform_outputs")
         os.makedirs(output_dir, exist_ok=True)
@@ -43,9 +26,29 @@ def process_file(args):
         input_file_name = os.path.basename(file_path).replace('.xlsx', '')
         log_file_path = os.path.join(output_dir, f"debug_log_{input_file_name}.txt")
 
-        # Read and process data
-        df = pd.read_excel(file_path)
-        trajectory_df = calculate_position_orientation(df, zero_config)
+        # Read the Position_Orientation sheet directly
+        df = pd.read_excel(file_path, sheet_name='Position_Orientation')
+        
+        # Check for required columns
+        required_columns = ['t(ms)', 'X(m)', 'Y(m)', 'Z(m)', 'Roll(deg)', 'Pitch(deg)', 'Yaw(deg)']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns in Position_Orientation sheet: {', '.join(missing_columns)}")
+        
+        # Rename columns to match controller expectations
+        column_map = {
+            't(ms)': 'time',
+            'X(m)': 'x',
+            'Y(m)': 'y',
+            'Z(m)': 'z',
+            'Roll(deg)': 'roll',
+            'Pitch(deg)': 'pitch',
+            'Yaw(deg)': 'yaw'
+        }
+        trajectory_df = df.rename(columns=column_map)
+        
+        # Convert time from milliseconds to seconds
+        trajectory_df['time'] = trajectory_df['time'] / 1000.0
         
         # Create controller and process
         controller = PlatformController(leg_length, rail_max_travel, log_file_path, log_attempts=enable_logging)

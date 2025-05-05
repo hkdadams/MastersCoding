@@ -281,3 +281,106 @@ This script is particularly useful for:
 - Batch processing multiple motion files
 - Comparing performance across different configurations
 - Generating statistical insights about optimal platform sizes
+
+## Batch Processing with `Batch_process_motions.py`
+
+The `Batch_process_motions.py` script provides automated processing of multiple motion files in parallel, with built-in trajectory optimization.
+
+### Features
+- Parallel processing of multiple Excel files using multiprocessing
+- Automatic file discovery in specified directory
+- Configurable zeroing options for each motion component
+- Two-phase processing strategy:
+  1. Initial processing without optimization (for baseline metrics)
+  2. Optimized processing with position and rotation offset optimization
+- Progress tracking with tqdm progress bar
+- Comprehensive error handling and reporting
+- Performance comparison between optimized and non-optimized results
+
+### Usage
+
+1. Run the script:
+   ```bash
+   python Batch_process_motions.py
+   ```
+
+2. When prompted:
+   - Enter the directory path containing Excel files (or press Enter for current directory)
+   - Configure zeroing options for each motion component (X, Y, Z translations and Roll, Pitch, Yaw rotations)
+   - Specify platform parameters:
+     - Leg length (default 0.3m)
+     - Maximum rail travel (default 0.5m)
+
+3. The script will:
+   - Scan the directory for Excel files
+   - Process each file in parallel using multiple CPU cores
+   - Display progress with a progress bar
+   - Show optimization improvements for each file
+   - Provide a summary of successful and failed operations
+
+### Processing Steps
+
+For each file, the script:
+
+1. **Data Loading and Initial Processing**:
+   - Reads the Excel file
+   - Calculates initial position and orientation using zeroing configuration
+   - Saves results to 'Position_Orientation' sheet
+
+2. **Non-optimized Processing**:
+   - Processes trajectory without optimization
+   - Calculates and displays initial metrics:
+     - Peak velocities
+     - Peak accelerations
+     - Initial platform configuration
+
+3. **Optimization Phase**:
+   - Optimizes platform position and rotation offsets
+   - Applies optimized offsets
+   - Processes trajectory with optimization
+   - Calculates improvement metrics:
+     - Velocity reduction percentage
+     - Acceleration reduction percentage
+
+### Output
+
+For each processed file:
+
+1. Console output showing:
+   - Initial platform configuration
+   - Non-optimized performance metrics
+   - Optimization results
+   - Improvement percentages
+
+2. Updated Excel file containing:
+   - Position_Orientation sheet with processed data
+   - Additional sheets with optimization results
+
+3. Summary statistics:
+   - Total number of files processed
+   - Success/failure counts
+   - Error details for failed files
+
+### Performance Features
+
+- Utilizes half of available CPU cores to avoid system overload
+- Parallel processing with ProcessPoolExecutor
+- Progress tracking with tqdm
+- Efficient memory management
+- Comprehensive error handling and reporting
+
+### Applications
+
+This script is ideal for:
+- Processing large batches of motion capture data
+- Analyzing multiple platform trajectories
+- Comparing optimized vs non-optimized performance
+- Validating motion feasibility across multiple scenarios
+
+### Error Handling
+
+The script provides:
+- Robust directory and file validation
+- Per-file error catching and reporting
+- Clear success/failure statistics
+- Detailed error messages for troubleshooting

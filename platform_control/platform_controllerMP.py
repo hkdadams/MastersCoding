@@ -724,7 +724,7 @@ class PlatformController:
             self.position_offset = orig_pos_offset
             self.rotation_offset = orig_rot_offset
 
-    def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True) -> pd.DataFrame:
+    def process_trajectory(self, trajectory_df: pd.DataFrame, file_path: str, apply_optimization: bool = True, auto_overwrite: bool = True) -> pd.DataFrame:
         """
         Process trajectory data from DataFrame and compute slider positions and motor angles.
         Avoids splitting into chunks to prevent boundary errors.
@@ -734,19 +734,21 @@ class PlatformController:
                          angles in degrees
             file_path: Path to the input Excel file
             apply_optimization: Whether to apply stored offsets
+            auto_overwrite: If True, automatically overwrite existing files without prompting
 
         Returns:
             DataFrame with computed slider positions and motor angles
         """
         dt = trajectory_df['time'].diff().iloc[1]
 
-        # Prepare shared data
-        shared_data = {
-            'dt': dt,
-            'apply_optimization': apply_optimization,
-            'prev_sliders': None
-        }
+        # Create output directory structure
+        output_dir = os.path.join(os.path.dirname(file_path), "platform_outputs")
+        os.makedirs(output_dir, exist_ok=True)
 
+        # Create the output file name based on the input file name
+        input_file_name = os.path.basename(file_path).replace('.xlsx', '')
+        output_file = os.path.join(output_dir, f"{input_file_name}_platform_motion.xlsx")
+        
         all_results = []
 
         print("\nProcessing trajectory without chunking")
@@ -847,19 +849,10 @@ class PlatformController:
         # Create DataFrame with results
         results_df = pd.DataFrame(all_results)
 
-        # Create the output file name based on the input file name
-        input_file_name = os.path.basename(file_path).replace('.xlsx', '')
-        output_file = f"{input_file_name}_platform_motion.xlsx"
-        print(f"\nCreating output file: {os.path.abspath(output_file)}...")
-
-        # Create an empty Excel file to ensure it works without waiting for the whole code to run
-        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-            pd.DataFrame().to_excel(writer, sheet_name='Placeholder', index=False)
-
         # Update the export logic to use the new output file name
         print(f"\nExporting results to {os.path.abspath(output_file)}...")
         with ThreadPoolExecutor() as executor:
-            executor.submit(self.export_results_to_excel, results_df, output_file)
+            executor.submit(self.export_results_to_excel, results_df, output_file, auto_overwrite)
 
         print(f"\nResults successfully exported to {os.path.abspath(output_file)}")
         print("\nKey Statistics:")
@@ -868,11 +861,29 @@ class PlatformController:
 
         return results_df
 
-    def export_results_to_excel(self, results_df: pd.DataFrame, output_file: str):
+    def export_results_to_excel(self, results_df: pd.DataFrame, output_file: str, auto_overwrite: bool = True):
         """Export results to Excel file"""
         try:
+            # Create an output directory
+            output_dir = os.path.join(os.path.dirname(output_file), "platform_outputs")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Update output file path to be in the output directory
+            base_name = os.path.basename(output_file)
+            if not base_name.endswith('_platform_motion.xlsx'):
+                base_name = base_name.replace('.xlsx', '_platform_motion.xlsx')
+            output_file = os.path.join(output_dir, base_name)
+            
+            # Check if file exists and warn user
+            if os.path.exists(output_file) and not auto_overwrite:
+                user_input = input(f"\nWarning: {os.path.basename(output_file)} already exists. Overwrite? (y/N): ")
+                if not user_input.lower().startswith('y'):
+                    print("Export cancelled. Please provide a different filename.")
+                    return
+            
             # First write the final optimization summary to the debug log
-            with open(self.log_file_path, "a") as debug_file:
+            debug_log_path = os.path.join(output_dir, f"debug_log_{os.path.basename(output_file).replace('_platform_motion.xlsx', '')}.txt")
+            with open(debug_log_path, "a") as debug_file:
                 debug_file.write("\n\nFINAL OPTIMIZATION RESULTS\n")
                 debug_file.write("=========================\n\n")
                 
@@ -1101,16 +1112,14 @@ def main():
         except Exception as e:
             print(f"Error: {str(e)}")
     
-    # Ensure debug log directory and file path setup
-    debug_log_dir = os.path.join(os.getcwd(), "platform_control")
-    os.makedirs(debug_log_dir, exist_ok=True)  # Ensure the directory exists
-    print(f"Debug log directory ensured: {debug_log_dir}")
+    # Create output directory in the same folder as the input file
+    output_dir = os.path.join(os.path.dirname(file_path), "platform_outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output directory created/verified: {output_dir}")
 
-    # Define the input file name for debug log suffix
+    # Define the debug log file path in the output directory
     input_file_name = os.path.basename(file_path).replace('.xlsx', '')
-
-    # Define the debug log file path
-    log_file_path = os.path.join(debug_log_dir, f"debug_log_{input_file_name}.txt")
+    log_file_path = os.path.join(output_dir, f"debug_log_{input_file_name}.txt")
     print(f"Debug log file path set: {log_file_path}")
 
     # Create the debug log file to ensure it exists

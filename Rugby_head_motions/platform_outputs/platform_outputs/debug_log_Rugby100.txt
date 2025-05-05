@@ -1,0 +1,84 @@
+
+
+FINAL OPTIMIZATION RESULTS
+=========================
+
+Optimization Score:
+
+
+FINAL OPTIMIZATION RESULTS
+=========================
+
+Optimization Score:
+Best Feasible Score: 2431.661709
+
+Platform Motion Ranges:
+X Range: -0.280 to -0.043 m
+Y Range: -0.000 to 0.000 m
+Z Range: 0.026 to 0.095 m
+Roll Range: 10.9deg to 18.1deg
+Pitch Range: 35.9deg to 62.8deg
+Yaw Range: 3.0deg to 3.0deg
+
+Slider Positions:
+Slider 1: 0.110 to 0.309 m
+Slider 2: 0.370 to 0.430 m
+Slider 3: 0.393 to 0.446 m
+
+Peak Velocities:
+Slider 1: 3.927 m/s
+Slider 2: 2.655 m/s
+Slider 3: 2.560 m/s
+
+Peak Accelerations:
+Slider 1: 73.913 m/s^2
+Slider 2: 73.550 m/s^2
+Slider 3: 73.914 m/s^2
+
+Optimization Results:
+Position Offset: (-0.279, -0.000, 0.026) m
+Rotation Offset: (18.0, 36.8, 3.0)deg
+
+=========================
+
+
+FINAL OPTIMIZATION RESULTS
+=========================
+
+Optimization Score:
+
+
+FINAL OPTIMIZATION RESULTS
+=========================
+
+Optimization Score:
+Best Feasible Score: 2431.661709
+
+Platform Motion Ranges:
+X Range: -0.280 to -0.043 m
+Y Range: -0.000 to 0.000 m
+Z Range: 0.026 to 0.095 m
+Roll Range: 10.9deg to 18.1deg
+Pitch Range: 35.9deg to 62.8deg
+Yaw Range: 3.0deg to 3.0deg
+
+Slider Positions:
+Slider 1: 0.110 to 0.309 m
+Slider 2: 0.370 to 0.430 m
+Slider 3: 0.393 to 0.446 m
+
+Peak Velocities:
+Slider 1: 3.927 m/s
+Slider 2: 2.655 m/s
+Slider 3: 2.560 m/s
+
+Peak Accelerations:
+Slider 1: 73.913 m/s^2
+Slider 2: 73.550 m/s^2
+Slider 3: 73.914 m/s^2
+
+Optimization Results:
+Position Offset: (-0.279, -0.000, 0.026) m
+Rotation Offset: (18.0, 36.8, 3.0)deg
+
+=========================

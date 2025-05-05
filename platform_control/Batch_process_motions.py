@@ -12,123 +12,118 @@ sys.path.append(parent_dir)
 from Rugby_head_motions.process_kinematics import calculate_position_orientation
 from platform_controllerMP import PlatformController  # Using the MP version
 
+def cleanup_memory():
+    """Perform memory cleanup to free resources"""
+    import gc
+    gc.collect()
+
 def process_file(args):
     """Process a single Excel file to calculate position and orientation"""
     file_path, leg_length, rail_max_travel, zero_config, enable_logging = args
     error_details = {}
-    
-    # Create output directory structure
-    output_dir = os.path.join(os.path.dirname(file_path), "platform_outputs")
-    os.makedirs(output_dir, exist_ok=True)
+    start_time = pd.Timestamp.now()
+    df = None
+    trajectory_df = None
     
     try:
-        # Create debug log file path for this file
+        # Check if file is accessible
+        try:
+            with open(file_path, 'rb') as f:
+                pass
+        except PermissionError:
+            raise ValueError(f"Cannot access file - it may be open in Excel")
+        except Exception as e:
+            raise ValueError(f"File access error: {str(e)}")
+
+        # Create output directory
+        output_dir = os.path.join(os.path.dirname(file_path), "platform_outputs")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set up logging
         input_file_name = os.path.basename(file_path).replace('.xlsx', '')
         log_file_path = os.path.join(output_dir, f"debug_log_{input_file_name}.txt")
 
-        # Read the Excel file
+        # Read and process data
         df = pd.read_excel(file_path)
+        trajectory_df = calculate_position_orientation(df, zero_config)
         
-        # Calculate position and orientation with zeroing configuration
-        try:
-            results_df = calculate_position_orientation(df, zero_config)
-        except Exception as e:
-            error_details['position_orientation_error'] = str(e)
-            raise ValueError(f"Failed to calculate position and orientation: {str(e)}")
-        
-        # Write results to Position_Orientation sheet
-        try:
-            with pd.ExcelWriter(file_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                results_df.to_excel(writer, sheet_name='Position_Orientation', index=False)
-        except Exception as e:
-            error_details['excel_write_error'] = str(e)
-            raise ValueError(f"Failed to write results to Excel: {str(e)}")
-        
-        # Create platform controller with logging options
+        # Create controller and process
         controller = PlatformController(leg_length, rail_max_travel, log_file_path, log_attempts=enable_logging)
         
-        # Process trajectory with the controller
-        trajectory_df = pd.read_excel(file_path, sheet_name='Position_Orientation')
-        
-        # Rename columns to match controller expectations
-        column_map = {
-            't(ms)': 'time',
-            'X(m)': 'x',
-            'Y(m)': 'y',
-            'Z(m)': 'z',
-            'Roll(deg)': 'roll',
-            'Pitch(deg)': 'pitch',
-            'Yaw(deg)': 'yaw'
-        }
-        trajectory_df = trajectory_df.rename(columns=column_map)
-        trajectory_df['time'] = trajectory_df['time'] / 1000.0  # Convert ms to seconds
-        
-        # Process trajectory without optimization first
-        print(f"\nProcessing file: {os.path.basename(file_path)}")
-        print("Initial platform configuration:")
-        print(f"Position (x,y,z): ({trajectory_df['x'].iloc[0]:.3f}, {trajectory_df['y'].iloc[0]:.3f}, {trajectory_df['z'].iloc[0]:.3f})m")
-        print(f"Rotation (r,p,y): ({trajectory_df['roll'].iloc[0]:.1f}, {trajectory_df['pitch'].iloc[0]:.1f}, {trajectory_df['yaw'].iloc[0]:.1f})°")
-        
         # Process without optimization first
-        results_df_no_opt = controller.process_trajectory(trajectory_df, file_path=file_path, apply_optimization=False)
+        results_df_no_opt = controller.process_trajectory(
+            trajectory_df, 
+            file_path=file_path,
+            apply_optimization=False
+        )
         
-        # Calculate initial statistics
+        if results_df_no_opt is None:
+            raise ValueError("Failed to process trajectory without optimization")
+        
+        # Get initial metrics
         peak_velocities_no_opt = max(max(abs(v)) for v in results_df_no_opt['velocities'])
         peak_accelerations_no_opt = max(max(abs(a)) for a in results_df_no_opt['accelerations'])
         
-        print("\nNon-optimized results:")
-        print(f"Peak velocity: {peak_velocities_no_opt:.3f} m/s")
-        print(f"Peak acceleration: {peak_accelerations_no_opt:.3f} m/s²")
+        print(f"\nProcessing {os.path.basename(file_path)}")
+        print(f"Initial peak velocity: {peak_velocities_no_opt:.3f} m/s")
+        print(f"Initial peak acceleration: {peak_accelerations_no_opt:.3f} m/s²")
         
-        # Optimize offsets with proper parameters
-        print("\nOptimizing trajectory offsets...")
+        # Optimize and process
         pos_offset, rot_offset = controller.optimize_offsets(
             trajectory_df=trajectory_df,
-            log_file_path=log_file_path,
-            num_cores=None  # Will use default value
+            log_file_path=log_file_path
         )
         
-        # Set optimized offsets
-        controller.position_offset = pos_offset
-        controller.rotation_offset = rot_offset
+        if pos_offset is None or rot_offset is None:
+            raise ValueError("No feasible solution found during optimization")
         
-        # Process with optimization
-        print("\nProcessing trajectory with optimized offsets...")
-        results_df = controller.process_trajectory(trajectory_df, file_path=file_path)
+        results_df = controller.process_trajectory(
+            trajectory_df, 
+            file_path=file_path
+        )
         
-        # Calculate improvement
+        if results_df is None:
+            raise ValueError("Failed to process optimized trajectory")
+        
+        # Calculate improvements
         peak_velocities = max(max(abs(v)) for v in results_df['velocities'])
         peak_accelerations = max(max(abs(a)) for a in results_df['accelerations'])
         
         vel_improvement = (peak_velocities_no_opt - peak_velocities) / peak_velocities_no_opt * 100
         acc_improvement = (peak_accelerations_no_opt - peak_accelerations) / peak_accelerations_no_opt * 100
         
-        print("\nImprovement:")
+        processing_time = (pd.Timestamp.now() - start_time).total_seconds()
+        print(f"Processing complete in {processing_time:.1f} seconds")
         print(f"Velocity reduction: {vel_improvement:.1f}%")
         print(f"Acceleration reduction: {acc_improvement:.1f}%")
         
         return True, file_path, None
         
     except Exception as e:
-        error_details['main_error'] = str(e)
-        error_msg = f"Error processing {os.path.basename(file_path)}:\n"
-        error_msg += "\n".join([f"{k}: {v}" for k, v in error_details.items()])
+        error_details['error'] = str(e)
         
-        # Log error to a failure log file in the output directory
-        error_log_path = os.path.join(output_dir, "processing_errors.log")
+        # Log error
         try:
+            error_log_path = os.path.join(output_dir, "processing_errors.log")
             with open(error_log_path, 'a') as error_log:
                 error_log.write(f"\n{'='*50}\n")
                 error_log.write(f"File: {file_path}\n")
                 error_log.write(f"Time: {pd.Timestamp.now()}\n")
-                error_log.write(f"Error Details:\n")
-                for k, v in error_details.items():
-                    error_log.write(f"{k}:\n{v}\n")
+                error_log.write(f"Duration: {(pd.Timestamp.now() - start_time).total_seconds():.1f}s\n")
+                error_log.write(f"Error: {str(e)}\n")
                 error_log.write(f"{'='*50}\n")
         except Exception as log_error:
             print(f"Failed to write to error log: {str(log_error)}")
             
         return False, file_path, error_details
+        
+    finally:
+        # Clean up DataFrames
+        if df is not None:
+            del df
+        if trajectory_df is not None:
+            del trajectory_df
+        cleanup_memory()
 
 def check_existing_outputs(file_paths):
     """Check for existing output files and get user permission to overwrite"""

@@ -11,7 +11,7 @@ def cleanup_memory():
 
 def process_file(args):
     """Process a single Excel file with pre-processed position and orientation data"""
-    file_path, leg_length, rail_max_travel, zero_config, enable_logging = args
+    file_path, leg_length, rail_max_travel, enable_logging = args
     error_details = {}
     start_time = pd.Timestamp.now()
     df = None
@@ -174,21 +174,9 @@ def main():
     print(f"\nFound {len(excel_files)} Excel files in {dir_path}")
     file_paths = [os.path.join(dir_path, f) for f in excel_files]
     
-    # Get zeroing configuration
-    print("\nSelect which motion components to zero out:")
-    zero_config = {
-        'zero_x': input("Zero out X translation? (y/n, default=n): ").lower().startswith('y'),
-        'zero_y': input("Zero out Y translation? (y/n, default=n): ").lower().startswith('y'),
-        'zero_z': input("Zero out Z translation? (y/n, default=n): ").lower().startswith('y'),
-        'zero_roll': input("Zero out Roll rotation? (y/n, default=n): ").lower().startswith('y'),
-        'zero_pitch': input("Zero out Pitch rotation? (y/n, default=n): ").lower().startswith('y'),
-        'zero_yaw': input("Zero out Yaw rotation? (y/n, default=n): ").lower().startswith('y')
-    }
-    
-    # Print selected zeroing configuration
-    print("\nSelected zeroing configuration:")
-    for component, is_zeroed in zero_config.items():
-        print(f"{component}: {'Yes' if is_zeroed else 'No'}")
+    # Check for existing output files first
+    if not check_existing_outputs(file_paths):
+        return
     
     # Get geometric parameters
     leg_length = float(input("\nEnter leg length in meters (default 0.3): ") or "0.3")
@@ -197,47 +185,62 @@ def main():
     # Add logging option
     enable_logging = input("\nEnable optimization logging? (y/N): ").lower().startswith('y')
     
-    # Check for existing output files and get permission to overwrite
-    if not check_existing_outputs(file_paths):
-        return
-        
     # Create arguments for each file
-    process_args = [(f, leg_length, rail_max_travel, zero_config, enable_logging) for f in file_paths]
+    process_args = [(f, leg_length, rail_max_travel, enable_logging) for f in file_paths]
     
     print(f"\nProcessing {len(file_paths)} files sequentially...")
+    start_time = pd.Timestamp.now()
     
     # Process files one at a time with progress bar
     successful = 0
     failed = 0
     failed_files = []
     
-    # Create a progress bar for sequential processing
-    for args in tqdm(process_args, desc="Processing files", unit="file"):
-        success, file_path, error_details = process_file(args)
-        if success:
-            successful += 1
-        else:
-            failed += 1
-            failed_files.append((file_path, error_details))
-            print(f"\nError processing {os.path.basename(file_path)}:")
-            for error_type, error_msg in error_details.items():
-                print(f"  {error_type}: {error_msg}")
+    try:
+        # Create a progress bar for sequential processing
+        for i, args in enumerate(tqdm(process_args, desc="Processing files", unit="file")):
+            success, file_path, error_details = process_file(args)
+            if success:
+                successful += 1
+            else:
+                failed += 1
+                failed_files.append((file_path, error_details))
+                print(f"\nError processing {os.path.basename(file_path)}:")
+                for error_type, error_msg in error_details.items():
+                    print(f"  {error_type}: {error_msg}")
+            
+            # Show estimated time remaining
+            elapsed_time = (pd.Timestamp.now() - start_time).total_seconds()
+            files_remaining = len(file_paths) - (i + 1)
+            if i > 0:  # Only show estimate after first file
+                avg_time_per_file = elapsed_time / (i + 1)
+                est_remaining = avg_time_per_file * files_remaining
+                print(f"\nEstimated time remaining: {est_remaining/60:.1f} minutes")
     
-    # Print summary
-    print(f"\nProcessing complete!")
-    print(f"Successfully processed: {successful} files")
-    print(f"Failed: {failed} files")
+    except KeyboardInterrupt:
+        print("\n\nProcessing interrupted by user!")
+        cleanup_memory()
     
-    if failed > 0:
-        print("\nFailed files summary:")
-        for file_path, error_details in failed_files:
-            print(f"\n{os.path.basename(file_path)}:")
-            for error_type, error_msg in error_details.items():
-                print(f"  {error_type}: {error_msg}")
+    finally:
+        # Calculate total processing time
+        total_time = (pd.Timestamp.now() - start_time).total_seconds()
         
-        # Point to the error log in the output directory
-        output_dir = os.path.join(os.path.dirname(file_paths[0]), "platform_outputs")
-        print(f"\nDetailed error logs have been written to: {os.path.join(output_dir, 'processing_errors.log')}")
+        # Print summary
+        print(f"\nProcessing complete!")
+        print(f"Total processing time: {total_time/60:.1f} minutes")
+        print(f"Successfully processed: {successful} files")
+        print(f"Failed: {failed} files")
+        
+        if failed > 0:
+            print("\nFailed files summary:")
+            for file_path, error_details in failed_files:
+                print(f"\n{os.path.basename(file_path)}:")
+                for error_type, error_msg in error_details.items():
+                    print(f"  {error_type}: {error_msg}")
+            
+            # Point to the error log
+            output_dir = os.path.join(os.path.dirname(file_paths[0]), "platform_outputs")
+            print(f"\nDetailed error logs have been written to: {os.path.join(output_dir, 'processing_errors.log')}")
 
 if __name__ == '__main__':
     main()

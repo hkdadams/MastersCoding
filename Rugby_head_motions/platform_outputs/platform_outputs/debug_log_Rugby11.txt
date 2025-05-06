@@ -82,3 +82,45 @@ Position Offset: (-0.191, -0.000, 0.043) m
 Rotation Offset: (-1.0, 39.0, -0.8)deg
 
 =========================
+
+
+FINAL OPTIMIZATION RESULTS
+=========================
+
+Optimization Score:
+
+
+FINAL OPTIMIZATION RESULTS
+=========================
+
+Optimization Score:
+Best Feasible Score: 28.047509
+
+Platform Motion Ranges:
+X Range: -0.202 to -0.087 m
+Y Range: -0.000 to -0.000 m
+Z Range: 0.043 to 0.151 m
+Roll Range: -1.3deg to 25.3deg
+Pitch Range: 22.3deg to 39.0deg
+Yaw Range: -0.8deg to -0.8deg
+
+Slider Positions:
+Slider 1: 0.197 to 0.300 m
+Slider 2: 0.340 to 0.450 m
+Slider 3: 0.407 to 0.448 m
+
+Peak Velocities:
+Slider 1: 2.623 m/s
+Slider 2: 2.692 m/s
+Slider 3: 1.501 m/s
+
+Peak Accelerations:
+Slider 1: 50.000 m/s^2
+Slider 2: 49.992 m/s^2
+Slider 3: 46.672 m/s^2
+
+Optimization Results:
+Position Offset: (-0.191, -0.000, 0.043) m
+Rotation Offset: (-1.0, 39.0, -0.8)deg
+
+=========================

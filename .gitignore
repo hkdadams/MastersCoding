@@ -5,3 +5,7 @@ SOLIDWORKS
 ControlIK.html
 platform_motion
 *.xls*
+platform_outputs
+receipts
+platform_outputs/debug_log_*.txt
+**/debug_log_*.txt

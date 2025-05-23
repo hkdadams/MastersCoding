@@ -31,9 +31,9 @@
 #define DIAG_PIN_3 33
 
 // Create stepper driver instances - only pass Serial and R_SENSE
-TMC2209Stepper driver1(Serial3, R_SENSE);
-TMC2209Stepper driver2(Serial1, R_SENSE);
-TMC2209Stepper driver3(Serial2, R_SENSE);
+TMC2209Stepper driver1(&Serial3, R_SENSE);
+TMC2209Stepper driver2(&Serial1, R_SENSE);
+TMC2209Stepper driver3(&Serial2, R_SENSE);
 
 volatile bool emergencyStopActive = false;
 volatile bool motorStalled[3] = {false, false, false}; // Stall flags for each motor

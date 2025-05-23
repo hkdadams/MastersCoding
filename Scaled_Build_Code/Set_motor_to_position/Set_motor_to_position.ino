@@ -2,7 +2,7 @@
 
 // --- Constants ---
 #define R_SENSE 0.11f // Sense resistor value in ohms (typical value is 0.11 ohms)
-#define MOTOR_CURRENT_RMS 800 // Motor current in mA (adjust based on your motor specs)
+#define MOTOR_CURRENT_RMS 1500 // Motor current in mA (adjust based on your motor specs)
 #define STALLGUARD_THRESHOLD 50 // StallGuard threshold (needs tuning for your specific setup)
 
 // --- Pin Definitions ---
@@ -129,7 +129,7 @@ void setup() {
   // Initialize Motor 3 (Serial2: D8 TX2, D7 RX2)
   setupDriver(driver3, Serial2, MOTOR_CURRENT_RMS, STALLGUARD_THRESHOLD, "Motor 3");
 
-  Serial.println("Enter commands: 'm[num] p[steps] s[speed]' or 'm[num] t[threshold]' to set SGTHRS");
+  Serial.println("Enter commands: 'm[num] p[steps] s[speed]' or 'm[num] t[threshold](0-255)' to set SGTHRS");
   Serial.println("Example: m1 p2000 s800  OR  m1 t50");
   Serial.println("Or 'stop' to disable all motors.");
 }

@@ -30,10 +30,12 @@
 #define DIAG_PIN_2 28
 #define DIAG_PIN_3 33
 
-// Create stepper driver instances - only pass Serial and R_SENSE
-TMC2209Stepper driver1(&Serial3, R_SENSE);
-TMC2209Stepper driver2(&Serial1, R_SENSE);
-TMC2209Stepper driver3(&Serial2, R_SENSE);
+#define DRIVER_ADDRESS 0 // Set to your TMC2209 UART address (0 or 1)
+
+// Create stepper driver instances - pass Serial pointer, R_SENSE, and address
+TMC2209Stepper driver1(&Serial3, R_SENSE, DRIVER_ADDRESS);
+TMC2209Stepper driver2(&Serial1, R_SENSE, DRIVER_ADDRESS);
+TMC2209Stepper driver3(&Serial2, R_SENSE, DRIVER_ADDRESS);
 
 volatile bool emergencyStopActive = false;
 volatile bool motorStalled[3] = {false, false, false}; // Stall flags for each motor
@@ -78,7 +80,7 @@ void setupDriver(TMC2209Stepper &driver, HardwareSerial &port, int current, uint
   driver.sedn(0b01);  // Current decrease step speed for CoolStep
   
   // StallGuard configuration - critical for stall detection
-  driver.sgthrs(sg_threshold); // StallGuard threshold - VERY IMPORTANT TO TUNE!
+  driver.SGTHRS(sg_threshold); // StallGuard threshold - VERY IMPORTANT TO TUNE!
   // driver.pwm_autoscale(true); // Recommended for stealthChop
   // driver.en_spreadCycle(false); // Use stealthChop (quieter) by default. Set true for spreadCycle (more torque)
   
@@ -169,7 +171,7 @@ void updateMotors() {
   unsigned long now = micros();
   for (int i = 0; i < 3; ++i) {
     if (motors[i].moving && !motorStalled[i] && !emergencyStopActive) {
-      long delay_us = 1000000L / motors[i].speed_sps / 2;
+      unsigned long delay_us = 1000000UL / motors[i].speed_sps / 2;
       if (now - motors[i].lastStepTime >= delay_us) {
         digitalWrite(motors[i].stepPin, HIGH);
         delayMicroseconds(5); // Short pulse
@@ -312,11 +314,11 @@ void loop() {
         Serial.print("Setting SGTHRS for Motor "); Serial.print(motorNum);
         Serial.print(" to "); Serial.println(thresholdValue);
         if (motorNum == 1) {
-            driver1.sgthrs(thresholdValue);
+            driver1.SGTHRS(thresholdValue);
         } else if (motorNum == 2) {
-            driver2.sgthrs(thresholdValue);
+            driver2.SGTHRS(thresholdValue);
         } else if (motorNum == 3) {
-            driver3.sgthrs(thresholdValue);
+            driver3.SGTHRS(thresholdValue);
         }
         return;
     } else if (parsed_move >= 2 && motorNum >= 1 && motorNum <= 3) { // p[steps] is mandatory, s[speed] is optional

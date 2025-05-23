@@ -5,6 +5,7 @@ from tqdm import tqdm
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
 
+
 def get_peak_with_sign(series):
     # Find the value with the maximum absolute magnitude but preserve its sign
     idx = series.abs().idxmax()

@@ -322,6 +322,38 @@ int validateSpeed(int motorIndex, int requestedSpeed) {
     return requestedSpeed;
 }
 
+// Time-based speed calculation function
+int calculateSpeedFromTime(long steps, unsigned long time_ms) {
+  if (time_ms <= 0) {
+    Serial.println("Warning: Time must be positive, using default 800 sps");
+    return 800;
+  }
+  
+  if (steps == 0) {
+    Serial.println("Warning: No movement requested, using default 800 sps");
+    return 800;
+  }
+  
+  // Calculate steps per second: steps / (time_ms / 1000)
+  float calculatedSpeed = (float)abs(steps) * 1000.0 / (float)time_ms;
+  
+  // Round to nearest integer
+  int speed = (int)(calculatedSpeed + 0.5);
+  
+  // Ensure minimum speed of 1 sps
+  if (speed < 1) {
+    Serial.print("Warning: Calculated speed too low ("); Serial.print(calculatedSpeed, 2);
+    Serial.println(" sps), using minimum 1 sps");
+    return 1;
+  }
+  
+  Serial.print("Calculated speed: "); Serial.print(speed);
+  Serial.print(" sps for "); Serial.print(abs(steps));
+  Serial.print(" steps in "); Serial.print(time_ms); Serial.println(" ms");
+  
+  return speed;
+}
+
 // Position validation function
 bool validatePosition(int motorIndex, long requestedSteps, long &validatedSteps) {
   if (motorIndex < 0 || motorIndex >= 3) {
@@ -492,9 +524,8 @@ void updateMotors() {
         motors[i].moving = false;
         digitalWrite(motors[i].enPin, HIGH); // Disable driver
         Serial.print("Motor "); Serial.print(i + 1); 
-        Serial.println(" movement stopped due to stall detection");
-      }else if (!emergencyStopActive) {
-        unsigned long delay_us = 1000000L / motors[i].speed_sps / 2;
+        Serial.println(" movement stopped due to stall detection");      }else if (!emergencyStopActive) {
+        unsigned long delay_us = 1000000L / motors[i].speed_sps;
         if (now - motors[i].lastStepTime >= delay_us) {
           digitalWrite(motors[i].stepPin, HIGH);
           delayMicroseconds(5); // Short pulse
@@ -612,10 +643,11 @@ void loop() {
       Serial.println("========================================");
       Serial.println("           MOTOR CONTROL HELP");
       Serial.println("========================================");
-      Serial.println();
-      Serial.println("=== BASIC MOTOR COMMANDS ===");
+      Serial.println();      Serial.println("=== BASIC MOTOR COMMANDS ===");
       Serial.println("m[num] p[steps] s[speed]  - Move motor with steps and speed");
       Serial.println("                            Example: m1 p2000 s800");
+      Serial.println("m[num] p[steps] t[time]   - Move motor with steps in specified time");
+      Serial.println("                            Example: m1 p2000 t5000 (2000 steps in 5 seconds)");
       Serial.println("m[num] t[threshold]       - Set StallGuard threshold (0-255)");
       Serial.println("                            Example: m1 t100");
       Serial.println();      
@@ -626,10 +658,11 @@ void loop() {
       Serial.println("disable1/2/3              - Disable specific motor driver");
       Serial.println("enableall                 - Enable all motor drivers");
       Serial.println("disableall                - Disable all motor drivers");
-      Serial.println();
-      Serial.println("=== BATCH INSTRUCTION SYSTEM ===");
+      Serial.println();      Serial.println("=== BATCH INSTRUCTION SYSTEM ===");
       Serial.println("add m[num] p[steps] s[speed] - Queue instruction for motor");
       Serial.println("                               Example: add m1 p1000 s500");
+      Serial.println("add m[num] p[steps] t[time]  - Queue timed instruction for motor");
+      Serial.println("                               Example: add m1 p1000 t2000 (1000 steps in 2 seconds)");
       Serial.println("show                      - Display all queued instructions");
       Serial.println("run                       - Execute all queued instructions");
       Serial.println("clear                     - Clear all instruction queues");
@@ -639,9 +672,10 @@ void loop() {
       Serial.println("home m[num]               - Set current position as home (0.0mm)");
       Serial.println("                            Example: home m1");
       Serial.println("cal m[num] f[mm/step]     - Set calibration factor");
-      Serial.println("                            Example: cal m1 f0.0125");
-      Serial.println("goto m[num] p[mm] s[speed] - Move to absolute position");
+      Serial.println("                            Example: cal m1 f0.0125");      Serial.println("goto m[num] p[mm] s[speed] - Move to absolute position");
       Serial.println("                            Example: goto m1 p25.5 s1000");
+      Serial.println("goto m[num] p[mm] t[time]  - Move to absolute position in specified time");
+      Serial.println("                            Example: goto m1 p25.5 t3000 (to 25.5mm in 3 seconds)");
       Serial.println();
       Serial.println("=== SPEED MANAGEMENT ===");
       Serial.println("setspeed m[num] s[speed]  - Set maximum speed limit for motor");
@@ -667,10 +701,12 @@ void loop() {
       Serial.println();      Serial.println("=== NOTES ===");
       Serial.println("- Motor numbers: 1, 2, or 3");
       Serial.println("- Speed in steps per second (sps)");
+      Serial.println("- Time in milliseconds (ms)");
       Serial.println("- Position in millimeters (mm)");
       Serial.println("- Default calibration: 0.0125mm per step");
       Serial.println("- Motors must be homed before absolute positioning");
       Serial.println("- Position limits prevent travel beyond ±14,000 steps from home");
+      Serial.println("- Time-based commands automatically calculate speed from distance and time");
       Serial.println("========================================");
       return;
     }
@@ -1005,7 +1041,23 @@ void loop() {
         moveToPosition(gotoMotorNum - 1, targetPosition, gotoSpeed);
       }
       return;
-    }
+    }    // Parse time-based movement commands
+    int timeMotorNum = 0;
+    long timeStepsToMove = 0;
+    unsigned long moveTime_ms = 0;
+    int parsed_time_move = sscanf(command.c_str(), "m%d p%ld t%lu", &timeMotorNum, &timeStepsToMove, &moveTime_ms);
+    
+    // Parse time-based goto command: goto m[num] p[position] t[time_ms]
+    int gotoTimeMotorNum = 0;
+    float gotoTimePosition = 0.0;
+    unsigned long gotoTime_ms = 0;
+    int parsed_goto_time = sscanf(command.c_str(), "goto m%d p%f t%lu", &gotoTimeMotorNum, &gotoTimePosition, &gotoTime_ms);
+    
+    // Parse time-based add command: add m[num] p[steps] t[time_ms]
+    int addTimeMotorNum = 0;
+    long addTimeSteps = 0;
+    unsigned long addTime_ms = 0;
+    int parsed_add_time = sscanf(command.c_str(), "add m%d p%ld t%lu", &addTimeMotorNum, &addTimeSteps, &addTime_ms);
 
     int motorNum = 0;
     long stepsToMove = 0;
@@ -1022,8 +1074,67 @@ void loop() {
         } else if (motorNum == 2) {
             driver2.SGTHRS(thresholdValue);
         } else if (motorNum == 3) {
-            driver3.SGTHRS(thresholdValue);
+            driver3.SGTHRS(thresholdValue);        }
+        return;
+    } else if (parsed_time_move == 3 && timeMotorNum >= 1 && timeMotorNum <= 3) {
+        // Handle time-based movement command: m[num] p[steps] t[time_ms]
+        int calculatedSpeed = calculateSpeedFromTime(timeStepsToMove, moveTime_ms);
+        int validatedSpeed = validateSpeed(timeMotorNum - 1, calculatedSpeed);
+        
+        Serial.print("Time-based move - Motor: "); Serial.print(timeMotorNum);
+        Serial.print(" Steps: "); Serial.print(timeStepsToMove);
+        Serial.print(" Time: "); Serial.print(moveTime_ms); Serial.print("ms");
+        Serial.print(" Calculated Speed: "); Serial.println(validatedSpeed);
+
+        if (motorStalled[timeMotorNum-1]) {
+            Serial.print("Motor "); Serial.print(timeMotorNum); Serial.println(" is stalled. Reset stalls to move.");
+        } else if (emergencyStopActive) {
+            Serial.println("Cannot move motors during emergency stop.");
+        } else {
+            startMotorMove(timeMotorNum-1, timeStepsToMove, validatedSpeed);
         }
+        return;
+    } else if (parsed_goto_time == 3 && gotoTimeMotorNum >= 1 && gotoTimeMotorNum <= 3) {
+        // Handle time-based goto command: goto m[num] p[position] t[time_ms]
+        if (!position[gotoTimeMotorNum-1].isHomed) {
+            Serial.print("Motor "); Serial.print(gotoTimeMotorNum); 
+            Serial.println(" not homed. Use 'home m[num]' first.");
+            return;
+        }
+        
+        // Calculate steps needed to reach target position
+        long targetSteps = (long)(gotoTimePosition / position[gotoTimeMotorNum-1].mmPerStep);
+        long stepsToMove = targetSteps - position[gotoTimeMotorNum-1].totalSteps;
+        
+        int calculatedSpeed = calculateSpeedFromTime(stepsToMove, gotoTime_ms);
+        int validatedSpeed = validateSpeed(gotoTimeMotorNum - 1, calculatedSpeed);
+        
+        Serial.print("Time-based goto - Motor "); Serial.print(gotoTimeMotorNum);
+        Serial.print(" from "); Serial.print(position[gotoTimeMotorNum-1].currentPosition_mm, 2);
+        Serial.print("mm to "); Serial.print(gotoTimePosition, 2);
+        Serial.print("mm in "); Serial.print(gotoTime_ms); Serial.print("ms");
+        Serial.print(" ("); Serial.print(stepsToMove); Serial.print(" steps at ");
+        Serial.print(validatedSpeed); Serial.println(" sps)");
+
+        if (motorStalled[gotoTimeMotorNum-1]) {
+            Serial.print("Motor "); Serial.print(gotoTimeMotorNum); Serial.println(" is stalled. Reset stalls to move.");
+        } else if (emergencyStopActive) {
+            Serial.println("Cannot move motors during emergency stop.");
+        } else {
+            startMotorMove(gotoTimeMotorNum-1, stepsToMove, validatedSpeed);
+        }
+        return;
+    } else if (parsed_add_time == 3 && addTimeMotorNum >= 1 && addTimeMotorNum <= 3) {
+        // Handle time-based add command: add m[num] p[steps] t[time_ms]
+        int calculatedSpeed = calculateSpeedFromTime(addTimeSteps, addTime_ms);
+        int validatedSpeed = validateSpeed(addTimeMotorNum - 1, calculatedSpeed);
+        
+        Serial.print("Time-based instruction - Motor: "); Serial.print(addTimeMotorNum);
+        Serial.print(" Steps: "); Serial.print(addTimeSteps);
+        Serial.print(" Time: "); Serial.print(addTime_ms); Serial.print("ms");
+        Serial.print(" Calculated Speed: "); Serial.println(validatedSpeed);
+        
+        addInstruction(addTimeMotorNum - 1, addTimeSteps, validatedSpeed);
         return;
     } else if (parsed_move >= 2 && motorNum >= 1 && motorNum <= 3) { // p[steps] is mandatory, s[speed] is optional
       if (parsed_move == 2) {
@@ -1040,9 +1151,8 @@ void loop() {
         Serial.println("Cannot move motors during emergency stop.");
       } else {
         startMotorMove(motorNum-1, stepsToMove, speed);
-      }      return;    } else {
-      Serial.println("Invalid command. Type 'help' for complete command reference.");
-      Serial.println("Basic: 'm[num] p[steps] s[speed]' OR 'm[num] t[value]' OR 'resetstalls' OR 'stop'");
+      }      return;    } else {      Serial.println("Invalid command. Type 'help' for complete command reference.");
+      Serial.println("Basic: 'm[num] p[steps] s[speed]' OR 'm[num] p[steps] t[time_ms]' OR 'm[num] t[value]' OR 'resetstalls' OR 'stop'");
       // Flush any remaining input to avoid repeated errors
       while (Serial.available() > 0) {
           Serial.read();

@@ -76,6 +76,22 @@ bool batchActive = false; // Flag to indicate batch is currently running
 // Speed limiting system
 int maxSpeed[3] = {3000, 3000, 3000}; // Maximum allowed speed for each motor (steps per second)
 
+// Position tracking system
+struct PositionTracker {
+  long totalSteps;           // Total steps from home position
+  float mmPerStep;          // Conversion factor: millimeters per step
+  float currentPosition_mm; // Current position in millimeters
+  long homeOffset;          // Steps offset from absolute zero
+  bool isHomed;             // Whether this motor has been homed
+};
+
+// Position trackers for each motor
+PositionTracker position[3] = {
+  {0, 0.0125, 0.0, 0, false},  // Motor 1: 0.0125mm per step (belt drive calibration)
+  {0, 0.0125, 0.0, 0, false},  // Motor 2: 0.0125mm per step (belt drive calibration)
+  {0, 0.0125, 0.0, 0, false}   // Motor 3: 0.0125mm per step (belt drive calibration)
+};
+
 volatile bool emergencyStopActive = false;
 volatile bool motorStalled[3] = {false, false, false}; // Stall flags for each motor
 volatile unsigned long lastStallTime[3] = {0, 0, 0}; // Store last interrupt time for each motor
@@ -242,21 +258,32 @@ void setup() {
   // Clear any false stall flags that might have been set during initialization
   for (int i = 0; i < 3; i++) {
     motorStalled[i] = false;
-  }    Serial.println("Enter commands: 'm[num] p[steps] s[speed]' or 'm[num] t[threshold]' to set SGTHRS");
+  }  Serial.println("Enter commands: 'm[num] p[steps] s[speed]' or 'm[num] t[threshold]' to set SGTHRS");
   Serial.println("Example: m1 p2000 s800  OR  m1 t50");
   Serial.println("Or 'stop' to disable all motors.");
+  Serial.println("Type 'help' for complete command reference.");
   Serial.println("Additional commands: 'diag1/2/3' to read DIAG pin values, 'sgr1/2/3' to read StallGuard result");
   Serial.println("Debug commands: 'status' for system info, 'stalloff'/'stallon' to disable/enable stall detection");
   Serial.println("Test commands: 'testmove' for movement without stall detection, 'testall' for simultaneous 3-motor test");  Serial.println("Batch commands: 'add m[num] p[steps] s[speed]' to queue instructions, 'show' to view queues");
   Serial.println("               'run' to execute all queued instructions, 'clear' to clear all queues");
   Serial.println("Speed commands: 'setspeed m[num] s[speed]' to set max speed, 'showspeeds' to view current limits");
+  Serial.println("Position commands: 'positions' to show all positions, 'home m[num]' to home motor");
+  Serial.println("                  'cal m[num] f[mm/step]' to set calibration, 'goto m[num] p[mm] s[speed]' for absolute move");
   Serial.println("Noise debugging: 'noisecount' to check false interrupts, 'resetnoise' to reset counters");
-  
-  // Print current speed limits
+    // Print current speed limits
   Serial.println("=== Current Speed Limits ===");
   for (int i = 0; i < 3; i++) {
     Serial.print("Motor "); Serial.print(i + 1); 
     Serial.print(": "); Serial.print(maxSpeed[i]); Serial.println(" sps");
+  }
+  
+  // Print initial position tracking status
+  Serial.println("=== Position Tracking Status ===");
+  for (int i = 0; i < 3; i++) {
+    Serial.print("Motor "); Serial.print(i + 1); 
+    Serial.print(": "); Serial.print(position[i].mmPerStep, 4); Serial.print(" mm/step, ");
+    Serial.print(position[i].isHomed ? "HOMED" : "NOT HOMED");
+    Serial.print(" ("); Serial.print(position[i].totalSteps); Serial.println(" steps)");
   }
   
   // Print final DIAG pin readings
@@ -282,8 +309,76 @@ int validateSpeed(int motorIndex, int requestedSpeed) {
     Serial.print("Limiting to "); Serial.print(maxSpeed[motorIndex]); Serial.println(" sps");
     return maxSpeed[motorIndex];
   }
+    return requestedSpeed;
+}
+
+// Position tracking functions
+void updatePosition(int motorIndex, long steps) {
+  if (motorIndex < 0 || motorIndex >= 3) return;
   
-  return requestedSpeed;
+  position[motorIndex].totalSteps += steps;
+  position[motorIndex].currentPosition_mm = position[motorIndex].totalSteps * position[motorIndex].mmPerStep;
+}
+
+void setPositionCalibration(int motorIndex, float mmPerStep) {
+  if (motorIndex < 0 || motorIndex >= 3) return;
+  
+  position[motorIndex].mmPerStep = mmPerStep;
+  // Recalculate current position with new calibration
+  position[motorIndex].currentPosition_mm = position[motorIndex].totalSteps * position[motorIndex].mmPerStep;
+  
+  Serial.print("Motor "); Serial.print(motorIndex + 1);
+  Serial.print(" calibration set to "); Serial.print(mmPerStep, 4);
+  Serial.println(" mm/step");
+}
+
+void homeMotor(int motorIndex) {
+  if (motorIndex < 0 || motorIndex >= 3) return;
+  
+  position[motorIndex].homeOffset = position[motorIndex].totalSteps;
+  position[motorIndex].totalSteps = 0;
+  position[motorIndex].currentPosition_mm = 0.0;
+  position[motorIndex].isHomed = true;
+  
+  Serial.print("Motor "); Serial.print(motorIndex + 1); Serial.println(" homed. Position reset to 0.0mm");
+}
+
+void moveToPosition(int motorIndex, float targetPosition_mm, int speed) {
+  if (motorIndex < 0 || motorIndex >= 3) return;
+  
+  if (!position[motorIndex].isHomed) {
+    Serial.print("Motor "); Serial.print(motorIndex + 1); 
+    Serial.println(" not homed. Use 'home m[num]' first.");
+    return;
+  }
+  
+  // Calculate steps needed to reach target position
+  long targetSteps = (long)(targetPosition_mm / position[motorIndex].mmPerStep);
+  long stepsToMove = targetSteps - position[motorIndex].totalSteps;
+  
+  Serial.print("Moving Motor "); Serial.print(motorIndex + 1);
+  Serial.print(" from "); Serial.print(position[motorIndex].currentPosition_mm, 2);
+  Serial.print("mm to "); Serial.print(targetPosition_mm, 2);
+  Serial.print("mm ("); Serial.print(stepsToMove); Serial.println(" steps)");
+  
+  startMotorMove(motorIndex, stepsToMove, speed);
+}
+
+void showPositions() {
+  Serial.println("=== Current Motor Positions ===");
+  for (int i = 0; i < 3; i++) {
+    Serial.print("Motor "); Serial.print(i + 1); Serial.print(": ");
+    
+    if (position[i].isHomed) {
+      Serial.print(position[i].currentPosition_mm, 3); Serial.print("mm (");
+      Serial.print(position[i].totalSteps); Serial.println(" steps)");
+    } else {
+      Serial.print(position[i].totalSteps); Serial.println(" steps [NOT HOMED]");
+    }
+    
+    Serial.print("  Calibration: "); Serial.print(position[i].mmPerStep, 4);
+    Serial.println(" mm/step");
+  }
 }
 
 void startMotorMove(int motorIndex, long steps, int speed) {
@@ -337,14 +432,16 @@ void startMotorMove(int motorIndex, long steps, int speed) {
 void updateMotors() {
   unsigned long now = micros();
   for (int i = 0; i < 3; ++i) {
-    if (motors[i].moving) {
-      if (motorStalled[i]) {
-        // Motor stalled during movement
+    if (motors[i].moving) {      if (motorStalled[i]) {
+        // Motor stalled during movement - update position with partial movement
+        long partialSteps = motors[i].direction == HIGH ? motors[i].currentStep : -motors[i].currentStep;
+        updatePosition(i, partialSteps);
+        
         motors[i].moving = false;
         digitalWrite(motors[i].enPin, HIGH); // Disable driver
         Serial.print("Motor "); Serial.print(i + 1); 
         Serial.println(" movement stopped due to stall detection");
-      } else if (!emergencyStopActive) {
+      }else if (!emergencyStopActive) {
         unsigned long delay_us = 1000000L / motors[i].speed_sps / 2;
         if (now - motors[i].lastStepTime >= delay_us) {
           digitalWrite(motors[i].stepPin, HIGH);
@@ -353,6 +450,11 @@ void updateMotors() {
           motors[i].currentStep++;
           motors[i].lastStepTime = now;          if (motors[i].currentStep >= motors[i].targetSteps) {
             motors[i].moving = false;
+            
+            // Update position tracking for completed move
+            long actualSteps = motors[i].direction == HIGH ? motors[i].targetSteps : -motors[i].targetSteps;
+            updatePosition(i, actualSteps);
+            
             Serial.print("Move complete for M"); Serial.println(i + 1);
             
             // Check if we're in batch mode and have more instructions
@@ -446,8 +548,66 @@ void loop() {
     command.trim();
     Serial.print("Received: "); Serial.println(command);    if (command.length() == 0) {
       return; // Ignore empty input
+    }    if (command.equalsIgnoreCase("help")) {
+      Serial.println("========================================");
+      Serial.println("           MOTOR CONTROL HELP");
+      Serial.println("========================================");
+      Serial.println();
+      Serial.println("=== BASIC MOTOR COMMANDS ===");
+      Serial.println("m[num] p[steps] s[speed]  - Move motor with steps and speed");
+      Serial.println("                            Example: m1 p2000 s800");
+      Serial.println("m[num] t[threshold]       - Set StallGuard threshold (0-255)");
+      Serial.println("                            Example: m1 t100");
+      Serial.println();
+      Serial.println("=== EMERGENCY & CONTROL ===");
+      Serial.println("stop                      - Emergency stop all motors");
+      Serial.println("resetstalls               - Clear stall flags and re-enable motors");
+      Serial.println("enable1/2/3               - Enable specific motor driver");
+      Serial.println("disable1/2/3              - Disable specific motor driver");
+      Serial.println();
+      Serial.println("=== BATCH INSTRUCTION SYSTEM ===");
+      Serial.println("add m[num] p[steps] s[speed] - Queue instruction for motor");
+      Serial.println("                               Example: add m1 p1000 s500");
+      Serial.println("show                      - Display all queued instructions");
+      Serial.println("run                       - Execute all queued instructions");
+      Serial.println("clear                     - Clear all instruction queues");
+      Serial.println();
+      Serial.println("=== POSITION TRACKING ===");
+      Serial.println("positions                 - Show current positions of all motors");
+      Serial.println("home m[num]               - Set current position as home (0.0mm)");
+      Serial.println("                            Example: home m1");
+      Serial.println("cal m[num] f[mm/step]     - Set calibration factor");
+      Serial.println("                            Example: cal m1 f0.0125");
+      Serial.println("goto m[num] p[mm] s[speed] - Move to absolute position");
+      Serial.println("                            Example: goto m1 p25.5 s1000");
+      Serial.println();
+      Serial.println("=== SPEED MANAGEMENT ===");
+      Serial.println("setspeed m[num] s[speed]  - Set maximum speed limit for motor");
+      Serial.println("                            Example: setspeed m1 s5000");
+      Serial.println("showspeeds                - Display current speed limits");
+      Serial.println();
+      Serial.println("=== DIAGNOSTICS & DEBUG ===");
+      Serial.println("status                    - Show system status and motor states");
+      Serial.println("diag1/2/3                 - Read DIAG pin values");
+      Serial.println("sgr1/2/3                  - Read StallGuard results");
+      Serial.println("stalloff/stallon          - Disable/enable stall detection");
+      Serial.println("noisecount                - Show false interrupt counts");
+      Serial.println("resetnoise                - Reset false interrupt counters");
+      Serial.println();
+      Serial.println("=== TEST COMMANDS ===");
+      Serial.println("testmove                  - Test move without stall detection");
+      Serial.println("testall                   - Test all three motors simultaneously");
+      Serial.println();
+      Serial.println("=== NOTES ===");
+      Serial.println("- Motor numbers: 1, 2, or 3");
+      Serial.println("- Speed in steps per second (sps)");
+      Serial.println("- Position in millimeters (mm)");
+      Serial.println("- Default calibration: 0.0125mm per step");
+      Serial.println("- Motors must be homed before absolute positioning");
+      Serial.println("========================================");
+      return;
     }
-
+    
     if (command.equalsIgnoreCase("stop")) {
       emergencyStopActive = true;
       return;
@@ -688,6 +848,49 @@ void loop() {
       return;
     }
 
+    // Position tracking commands
+    if (command.equalsIgnoreCase("positions")) {
+      showPositions();
+      return;
+    }
+    
+    // Parse home command: home m[num]
+    int homeMotorNum = 0;
+    int parsed_home = sscanf(command.c_str(), "home m%d", &homeMotorNum);
+    if (parsed_home == 1 && homeMotorNum >= 1 && homeMotorNum <= 3) {
+      homeMotor(homeMotorNum - 1);
+      return;
+    }
+    
+    // Parse calibration command: cal m[num] f[value]
+    int calMotorNum = 0;
+    float mmPerStep = 0.0;
+    int parsed_cal = sscanf(command.c_str(), "cal m%d f%f", &calMotorNum, &mmPerStep);
+    if (parsed_cal == 2 && calMotorNum >= 1 && calMotorNum <= 3 && mmPerStep > 0) {
+      setPositionCalibration(calMotorNum - 1, mmPerStep);
+      return;
+    }
+    
+    // Parse goto command: goto m[num] p[position] s[speed]
+    int gotoMotorNum = 0;
+    float targetPosition = 0.0;
+    int gotoSpeed = 800;
+    int parsed_goto = sscanf(command.c_str(), "goto m%d p%f s%d", &gotoMotorNum, &targetPosition, &gotoSpeed);
+    if (parsed_goto >= 2 && gotoMotorNum >= 1 && gotoMotorNum <= 3) {
+      if (parsed_goto == 2) {
+        gotoSpeed = 800; // Default speed if not provided
+      }
+      
+      if (motorStalled[gotoMotorNum-1]) {
+        Serial.print("Motor "); Serial.print(gotoMotorNum); Serial.println(" is stalled. Reset stalls to move.");
+      } else if (emergencyStopActive) {
+        Serial.println("Cannot move motors during emergency stop.");
+      } else {
+        moveToPosition(gotoMotorNum - 1, targetPosition, gotoSpeed);
+      }
+      return;
+    }
+
     int motorNum = 0;
     long stepsToMove = 0;
     int speed = 800;
@@ -721,12 +924,9 @@ void loop() {
         Serial.println("Cannot move motors during emergency stop.");
       } else {
         startMotorMove(motorNum-1, stepsToMove, speed);
-      }      return;
-    } else {
-      Serial.println("Invalid command. Use: 'm[num] p[steps] s[speed]' OR 'm[num] t[value]' OR 'resetstalls' OR 'stop'");
-      Serial.println("Or 'enable1/2/3' to enable a motor, 'disable1/2/3' to disable a motor.");
-      Serial.println("Batch commands: 'add m[num] p[steps] s[speed]', 'show', 'run', 'clear'");
-      Serial.println("Speed commands: 'setspeed m[num] s[speed]', 'showspeeds'");
+      }      return;    } else {
+      Serial.println("Invalid command. Type 'help' for complete command reference.");
+      Serial.println("Basic: 'm[num] p[steps] s[speed]' OR 'm[num] t[value]' OR 'resetstalls' OR 'stop'");
       // Flush any remaining input to avoid repeated errors
       while (Serial.available() > 0) {
           Serial.read();

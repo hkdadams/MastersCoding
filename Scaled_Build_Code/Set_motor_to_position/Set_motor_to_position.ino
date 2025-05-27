@@ -2,8 +2,8 @@
 
 // --- Constants ---
 #define R_SENSE 0.11f // Sense resistor value in ohms (typical value is 0.11 ohms)
-#define MOTOR_CURRENT_RMS 1500 // Motor current in mA (adjust based on your motor specs)
-#define STALLGUARD_THRESHOLD 50 // StallGuard threshold (needs tuning for your specific setup)
+#define MOTOR_CURRENT_RMS 1500 // Motor current in mA (increase for better torque)
+#define STALLGUARD_THRESHOLD 100 // StallGuard threshold (increase to be less sensitive)
 
 // --- Pin Definitions ---
 
@@ -40,7 +40,7 @@ TMC2209Stepper driver3(&Serial2, R_SENSE, DRIVER_ADDRESS);
 volatile bool emergencyStopActive = false;
 volatile bool motorStalled[3] = {false, false, false}; // Stall flags for each motor
 volatile unsigned long lastStallTime[3] = {0, 0, 0}; // Store last interrupt time for each motor
-const unsigned long debounceDelay = 5000; // microseconds (5ms debounce)
+const unsigned long debounceDelay = 10000; // microseconds (10ms debounce)
 volatile unsigned long lastEStopTime = 0;
 const unsigned long estopDebounceDelay = 5000; // microseconds (5ms debounce)
 
@@ -49,6 +49,7 @@ void stallISR1() {
   if (now - lastStallTime[0] > debounceDelay) {
     motorStalled[0] = true;
     lastStallTime[0] = now;
+    Serial.println("STALL DETECTED on Motor 1 (DIAG1 triggered)");
   }
 }
 
@@ -57,6 +58,7 @@ void stallISR2() {
   if (now - lastStallTime[1] > debounceDelay) {
     motorStalled[1] = true;
     lastStallTime[1] = now;
+    Serial.println("STALL DETECTED on Motor 2 (DIAG2 triggered)");
   }
 }
 
@@ -65,6 +67,7 @@ void stallISR3() {
   if (now - lastStallTime[2] > debounceDelay) {
     motorStalled[2] = true;
     lastStallTime[2] = now;
+    Serial.println("STALL DETECTED on Motor 3 (DIAG3 triggered)");
   }
 }
 
@@ -96,9 +99,9 @@ void setup() {
   pinMode(DIAG_PIN_1, INPUT);
   pinMode(DIAG_PIN_2, INPUT);
   pinMode(DIAG_PIN_3, INPUT);
-  attachInterrupt(digitalPinToInterrupt(DIAG_PIN_1), stallISR1, FALLING); // DIAG active LOW on stall
-  attachInterrupt(digitalPinToInterrupt(DIAG_PIN_2), stallISR2, FALLING);
-  attachInterrupt(digitalPinToInterrupt(DIAG_PIN_3), stallISR3, FALLING);
+  attachInterrupt(digitalPinToInterrupt(DIAG_PIN_1), stallISR1, RISING); // DIAG active LOW on stall
+  attachInterrupt(digitalPinToInterrupt(DIAG_PIN_2), stallISR2, RISING);
+  attachInterrupt(digitalPinToInterrupt(DIAG_PIN_3), stallISR3, RISING);
 
   // Set up Step/Dir/Enable pins for all motors
   pinMode(STEP_PIN_1, OUTPUT);
@@ -153,7 +156,13 @@ MotorState motors[3] = {
 };
 
 void startMotorMove(int motorIndex, long steps, int speed) {
-  if (motorStalled[motorIndex] || emergencyStopActive) {
+  if (emergencyStopActive) {
+    Serial.println("Cannot move during emergency stop");
+    return;
+  }
+  if (motorStalled[motorIndex]) {
+    Serial.print("Motor "); Serial.print(motorIndex + 1); 
+    Serial.println(" is marked as stalled. Use 'resetstalls' command to clear.");
     return;
   }
   motors[motorIndex].targetSteps = abs(steps);
@@ -164,37 +173,43 @@ void startMotorMove(int motorIndex, long steps, int speed) {
   motors[motorIndex].direction = (steps > 0) ? HIGH : LOW;
   digitalWrite(motors[motorIndex].dirPin, motors[motorIndex].direction);
   digitalWrite(motors[motorIndex].enPin, LOW); // Enable driver
-  motorStalled[motorIndex] = false;
+  Serial.print("Starting move for Motor "); Serial.print(motorIndex + 1);
+  Serial.print(" Steps: "); Serial.print(steps);
+  Serial.print(" Speed: "); Serial.println(speed);
 }
 
 void updateMotors() {
   unsigned long now = micros();
   for (int i = 0; i < 3; ++i) {
-    if (motors[i].moving && !motorStalled[i] && !emergencyStopActive) {
-      unsigned long delay_us = 1000000L / motors[i].speed_sps / 2;
-      if (now - motors[i].lastStepTime >= delay_us) {
-        digitalWrite(motors[i].stepPin, HIGH);
-        delayMicroseconds(5); // Short pulse
-        digitalWrite(motors[i].stepPin, LOW);
-        motors[i].currentStep++;
-        motors[i].lastStepTime = now;
-        if (motors[i].currentStep >= motors[i].targetSteps) {
-          motors[i].moving = false;
-          digitalWrite(motors[i].enPin, LOW); // Keep enabled
-          Serial.print("Move complete for M"); Serial.println(i + 1);
+    if (motors[i].moving) {
+      if (motorStalled[i]) {
+        // Motor stalled during movement
+        motors[i].moving = false;
+        digitalWrite(motors[i].enPin, HIGH); // Disable driver
+        Serial.print("Motor "); Serial.print(i + 1); 
+        Serial.println(" movement stopped due to stall detection");
+      } else if (!emergencyStopActive) {
+        unsigned long delay_us = 1000000L / motors[i].speed_sps / 2;
+        if (now - motors[i].lastStepTime >= delay_us) {
+          digitalWrite(motors[i].stepPin, HIGH);
+          delayMicroseconds(5); // Short pulse
+          digitalWrite(motors[i].stepPin, LOW);
+          motors[i].currentStep++;
+          motors[i].lastStepTime = now;
+          if (motors[i].currentStep >= motors[i].targetSteps) {
+            motors[i].moving = false;
+            digitalWrite(motors[i].enPin, LOW); // Keep enabled
+            Serial.print("Move complete for M"); Serial.println(i + 1);
+          }
         }
       }
     }
-    // Stall handling: only stop the stalled motor, not all
-    if (motorStalled[i] && motors[i].moving) {
-      motors[i].moving = false;
-      digitalWrite(motors[i].enPin, HIGH); // Disable only the stalled driver
-      Serial.print("STALL DETECTED on Motor "); Serial.println(i + 1);
-    }
-    // Emergency stop: stop all motors
+    // Emergency stop handling
     if (emergencyStopActive && motors[i].moving) {
       motors[i].moving = false;
       digitalWrite(motors[i].enPin, HIGH); // Disable all drivers
+      Serial.print("Motor "); Serial.print(i + 1); 
+      Serial.println(" stopped due to emergency stop");
     }
   }
 }

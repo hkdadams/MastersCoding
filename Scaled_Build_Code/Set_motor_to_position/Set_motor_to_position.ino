@@ -26,13 +26,13 @@
 // UART for M3: Serial2 (Teensy D8=TX2, D7=RX2)
 
 // --- DIAG Pin Definitions for Stall Detection ---
-#define DIAG_PIN_1 24
+#define DIAG_PIN_1 25
 #define DIAG_PIN_2 28
 #define DIAG_PIN_3 33
 
+// Create stepper driver instances - only pass Serial and R_SENSE
 #define DRIVER_ADDRESS 0 // Set to your TMC2209 UART address (0 or 1)
 
-// Create stepper driver instances - pass Serial pointer, R_SENSE, and address
 TMC2209Stepper driver1(&Serial3, R_SENSE, DRIVER_ADDRESS);
 TMC2209Stepper driver2(&Serial1, R_SENSE, DRIVER_ADDRESS);
 TMC2209Stepper driver3(&Serial2, R_SENSE, DRIVER_ADDRESS);
@@ -129,7 +129,7 @@ void setup() {
   // Initialize Motor 3 (Serial2: D8 TX2, D7 RX2)
   setupDriver(driver3, Serial2, MOTOR_CURRENT_RMS, STALLGUARD_THRESHOLD, "Motor 3");
 
-  Serial.println("Enter commands: 'm[num] p[steps] s[speed]' or 'm[num] t[threshold](0-255)' to set SGTHRS");
+  Serial.println("Enter commands: 'm[num] p[steps] s[speed]' or 'm[num] t[threshold]' to set SGTHRS");
   Serial.println("Example: m1 p2000 s800  OR  m1 t50");
   Serial.println("Or 'stop' to disable all motors.");
 }
@@ -147,9 +147,9 @@ struct MotorState {
 };
 
 MotorState motors[3] = {
-  {DIR_PIN_1, STEP_PIN_1, EN_PIN_1, 0, 0, 800, 0, false, 1},
-  {DIR_PIN_2, STEP_PIN_2, EN_PIN_2, 0, 0, 800, 0, false, 1},
-  {DIR_PIN_3, STEP_PIN_3, EN_PIN_3, 0, 0, 800, 0, false, 1}
+  {DIR_PIN_1, STEP_PIN_1, EN_PIN_1, 0, 0, MOTOR_CURRENT_RMS, 0, false, 1},
+  {DIR_PIN_2, STEP_PIN_2, EN_PIN_2, 0, 0, MOTOR_CURRENT_RMS, 0, false, 1},
+  {DIR_PIN_3, STEP_PIN_3, EN_PIN_3, 0, 0, MOTOR_CURRENT_RMS, 0, false, 1}
 };
 
 void startMotorMove(int motorIndex, long steps, int speed) {
@@ -171,7 +171,7 @@ void updateMotors() {
   unsigned long now = micros();
   for (int i = 0; i < 3; ++i) {
     if (motors[i].moving && !motorStalled[i] && !emergencyStopActive) {
-      unsigned long delay_us = 1000000UL / motors[i].speed_sps / 2;
+      unsigned long delay_us = 1000000L / motors[i].speed_sps / 2;
       if (now - motors[i].lastStepTime >= delay_us) {
         digitalWrite(motors[i].stepPin, HIGH);
         delayMicroseconds(5); // Short pulse
@@ -296,10 +296,28 @@ void loop() {
       }
       return;
     }
-    
+
     if (command.equalsIgnoreCase("disable3")) {
       digitalWrite(EN_PIN_3, HIGH); // Disable driver 3
       Serial.println("Motor 3 disabled.");
+      return;
+    }
+
+    if (command.equalsIgnoreCase("diag1")) {
+      Serial.print("DIAG1: ");
+      Serial.println(digitalRead(DIAG_PIN_1)); // Disable driver 3
+      return;
+    }
+
+    if (command.equalsIgnoreCase("diag2")) {
+      Serial.print("DIAG2: ");
+      Serial.println(digitalRead(DIAG_PIN_2)); // Disable driver 3
+      return;
+    }
+
+    if (command.equalsIgnoreCase("diag3")) {
+      Serial.print("DIAG3: ");
+      Serial.println(digitalRead(DIAG_PIN_3)); // Disable driver 3
       return;
     }
 

@@ -73,6 +73,9 @@ int currentInstruction[3] = {0, 0, 0}; // Current instruction being executed for
 bool batchMode = false;  // Flag to indicate if we're in batch execution mode
 bool batchActive = false; // Flag to indicate batch is currently running
 
+// Speed limiting system
+int maxSpeed[3] = {3000, 3000, 3000}; // Maximum allowed speed for each motor (steps per second)
+
 volatile bool emergencyStopActive = false;
 volatile bool motorStalled[3] = {false, false, false}; // Stall flags for each motor
 volatile unsigned long lastStallTime[3] = {0, 0, 0}; // Store last interrupt time for each motor
@@ -244,10 +247,17 @@ void setup() {
   Serial.println("Or 'stop' to disable all motors.");
   Serial.println("Additional commands: 'diag1/2/3' to read DIAG pin values, 'sgr1/2/3' to read StallGuard result");
   Serial.println("Debug commands: 'status' for system info, 'stalloff'/'stallon' to disable/enable stall detection");
-  Serial.println("Test commands: 'testmove' for movement without stall detection, 'testall' for simultaneous 3-motor test");
-  Serial.println("Batch commands: 'add m[num] p[steps] s[speed]' to queue instructions, 'show' to view queues");
+  Serial.println("Test commands: 'testmove' for movement without stall detection, 'testall' for simultaneous 3-motor test");  Serial.println("Batch commands: 'add m[num] p[steps] s[speed]' to queue instructions, 'show' to view queues");
   Serial.println("               'run' to execute all queued instructions, 'clear' to clear all queues");
+  Serial.println("Speed commands: 'setspeed m[num] s[speed]' to set max speed, 'showspeeds' to view current limits");
   Serial.println("Noise debugging: 'noisecount' to check false interrupts, 'resetnoise' to reset counters");
+  
+  // Print current speed limits
+  Serial.println("=== Current Speed Limits ===");
+  for (int i = 0; i < 3; i++) {
+    Serial.print("Motor "); Serial.print(i + 1); 
+    Serial.print(": "); Serial.print(maxSpeed[i]); Serial.println(" sps");
+  }
   
   // Print final DIAG pin readings
   Serial.print("Final DIAG readings - DIAG1: ");
@@ -258,6 +268,24 @@ void setup() {
   Serial.println(digitalRead(DIAG_PIN_3));  Serial.println("Setup complete. System ready for motor commands.");
 }
 
+// Speed validation function
+int validateSpeed(int motorIndex, int requestedSpeed) {
+  if (requestedSpeed <= 0) {
+    Serial.println("Warning: Speed must be positive, using default 800 sps");
+    return 800;
+  }
+  
+  if (requestedSpeed > maxSpeed[motorIndex]) {
+    Serial.print("Warning: Requested speed "); Serial.print(requestedSpeed);
+    Serial.print(" exceeds maximum for Motor "); Serial.print(motorIndex + 1);
+    Serial.print(" ("); Serial.print(maxSpeed[motorIndex]); Serial.print(" sps). ");
+    Serial.print("Limiting to "); Serial.print(maxSpeed[motorIndex]); Serial.println(" sps");
+    return maxSpeed[motorIndex];
+  }
+  
+  return requestedSpeed;
+}
+
 void startMotorMove(int motorIndex, long steps, int speed) {
   if (emergencyStopActive) {
     Serial.println("Cannot move during emergency stop");
@@ -266,8 +294,10 @@ void startMotorMove(int motorIndex, long steps, int speed) {
   if (motorStalled[motorIndex]) {
     Serial.print("Motor "); Serial.print(motorIndex + 1); 
     Serial.println(" is marked as stalled. Use 'resetstalls' command to clear.");
-    return;
-  }
+    return;  }
+  
+  // Validate and limit speed
+  int validatedSpeed = validateSpeed(motorIndex, speed);
   
   // Debug: Check DIAG pin and StallGuard before starting movement
   int diagPin = (motorIndex == 0) ? DIAG_PIN_1 : (motorIndex == 1) ? DIAG_PIN_2 : DIAG_PIN_3;
@@ -287,7 +317,7 @@ void startMotorMove(int motorIndex, long steps, int speed) {
   
   motors[motorIndex].targetSteps = abs(steps);
   motors[motorIndex].currentStep = 0;
-  motors[motorIndex].speed_sps = speed;
+  motors[motorIndex].speed_sps = validatedSpeed;  // Use validated speed
   motors[motorIndex].lastStepTime = micros();
   motors[motorIndex].moving = true;
   motors[motorIndex].direction = (steps > 0) ? HIGH : LOW;
@@ -296,7 +326,7 @@ void startMotorMove(int motorIndex, long steps, int speed) {
   
   Serial.print("Starting move for Motor "); Serial.print(motorIndex + 1);
   Serial.print(" Steps: "); Serial.print(steps);
-  Serial.print(" Speed: "); Serial.println(speed);
+  Serial.print(" Speed: "); Serial.println(validatedSpeed);  // Show validated speed
   
   // Debug: Check DIAG pin immediately after enabling driver
   delay(10); // Short delay to let driver stabilize
@@ -605,9 +635,40 @@ void loop() {
       showInstructions();
       return;
     }
-    
-    if (command.equalsIgnoreCase("run")) {
+      if (command.equalsIgnoreCase("run")) {
       executeBatch();
+      return;
+    }
+    
+    // Speed limit commands
+    if (command.equalsIgnoreCase("showspeeds")) {
+      Serial.println("=== Current Speed Limits ===");
+      for (int i = 0; i < 3; i++) {
+        Serial.print("Motor "); Serial.print(i + 1); 
+        Serial.print(": "); Serial.print(maxSpeed[i]); Serial.println(" sps");
+      }
+      return;
+    }
+    
+    // Parse setspeed command: setspeed m[motor] s[speed]
+    int speedMotorNum = 0;
+    int newMaxSpeed = 0;
+    int parsed_speed = sscanf(command.c_str(), "setspeed m%d s%d", &speedMotorNum, &newMaxSpeed);
+    
+    if (parsed_speed == 2 && speedMotorNum >= 1 && speedMotorNum <= 3) {
+      if (newMaxSpeed <= 0) {
+        Serial.println("Speed must be positive");
+        return;
+      }
+      if (newMaxSpeed > 10000) {
+        Serial.println("Warning: Speed limit above 10,000 sps may damage your device!");
+        Serial.print("Setting maximum to 10,000 sps for safety. Use values <= 3000 for normal operation.");
+        newMaxSpeed = 10000;
+      }
+      
+      maxSpeed[speedMotorNum - 1] = newMaxSpeed;
+      Serial.print("Motor "); Serial.print(speedMotorNum); 
+      Serial.print(" maximum speed set to "); Serial.print(newMaxSpeed); Serial.println(" sps");
       return;
     }
     
@@ -696,14 +757,17 @@ void addInstruction(int motorIndex, long steps, int speed) {
     return;
   }
   
+  // Validate speed before adding to queue
+  int validatedSpeed = validateSpeed(motorIndex, speed);
+  
   instructionQueue[motorIndex][instructionCount[motorIndex]].steps = steps;
-  instructionQueue[motorIndex][instructionCount[motorIndex]].speed = speed;
+  instructionQueue[motorIndex][instructionCount[motorIndex]].speed = validatedSpeed;
   instructionQueue[motorIndex][instructionCount[motorIndex]].valid = true;
   instructionCount[motorIndex]++;
   
   Serial.print("Added instruction to M"); Serial.print(motorIndex + 1);
   Serial.print(": "); Serial.print(steps); Serial.print(" steps at ");
-  Serial.print(speed); Serial.print(" sps ("); Serial.print(instructionCount[motorIndex]);
+  Serial.print(validatedSpeed); Serial.print(" sps ("); Serial.print(instructionCount[motorIndex]);
   Serial.println(" total instructions)");
 }
 

@@ -357,14 +357,16 @@ void updateMotors() {
             
             // Check if we're in batch mode and have more instructions
             if (batchActive && currentInstruction[i] < instructionCount[i] - 1) {
-              // Move to next instruction for this motor
-              currentInstruction[i]++;
+              // Move to next instruction for this motor              currentInstruction[i]++;
               Instruction nextInstr = instructionQueue[i][currentInstruction[i]];
+              
+              // Validate speed for next instruction
+              int validatedSpeed = validateSpeed(i, nextInstr.speed);
               
               // Start the next movement immediately
               motors[i].targetSteps = abs(nextInstr.steps);
               motors[i].currentStep = 0;
-              motors[i].speed_sps = nextInstr.speed;
+              motors[i].speed_sps = validatedSpeed;
               motors[i].lastStepTime = micros();
               motors[i].moving = true;
               motors[i].direction = (nextInstr.steps > 0) ? HIGH : LOW;
@@ -373,7 +375,7 @@ void updateMotors() {
               
               Serial.print("M"); Serial.print(i + 1); 
               Serial.print(" starting next instruction: "); Serial.print(nextInstr.steps);
-              Serial.print(" steps at "); Serial.print(nextInstr.speed); Serial.println(" sps");
+              Serial.print(" steps at "); Serial.print(validatedSpeed); Serial.println(" sps");
             } else {
               // No more instructions or not in batch mode - disable driver
               digitalWrite(motors[i].enPin, HIGH);
@@ -724,6 +726,7 @@ void loop() {
       Serial.println("Invalid command. Use: 'm[num] p[steps] s[speed]' OR 'm[num] t[value]' OR 'resetstalls' OR 'stop'");
       Serial.println("Or 'enable1/2/3' to enable a motor, 'disable1/2/3' to disable a motor.");
       Serial.println("Batch commands: 'add m[num] p[steps] s[speed]', 'show', 'run', 'clear'");
+      Serial.println("Speed commands: 'setspeed m[num] s[speed]', 'showspeeds'");
       // Flush any remaining input to avoid repeated errors
       while (Serial.available() > 0) {
           Serial.read();

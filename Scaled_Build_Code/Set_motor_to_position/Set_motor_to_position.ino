@@ -985,8 +985,27 @@ void loop() {
       Serial.print(" position limit set to ±"); Serial.print(newPositionLimit); Serial.println(" steps");
       return;
     }
+      // Parse time-based add command first: add m[num] p[steps] t[time_ms]
+    int addTimeMotorNum = 0;
+    long addTimeSteps = 0;
+    unsigned long addTime_ms = 0;
+    int parsed_add_time = sscanf(command.c_str(), "add m%d p%ld t%lu", &addTimeMotorNum, &addTimeSteps, &addTime_ms);
     
-    // Parse add command: add m[motor] p[steps] s[speed]
+    if (parsed_add_time == 3 && addTimeMotorNum >= 1 && addTimeMotorNum <= 3) {
+        // Handle time-based add command: add m[num] p[steps] t[time_ms]
+        int calculatedSpeed = calculateSpeedFromTime(addTimeSteps, addTime_ms);
+        int validatedSpeed = validateSpeed(addTimeMotorNum - 1, calculatedSpeed);
+        
+        Serial.print("Time-based instruction - Motor: "); Serial.print(addTimeMotorNum);
+        Serial.print(" Steps: "); Serial.print(addTimeSteps);
+        Serial.print(" Time: "); Serial.print(addTime_ms); Serial.print("ms");
+        Serial.print(" Calculated Speed: "); Serial.println(validatedSpeed);
+        
+        addInstruction(addTimeMotorNum - 1, addTimeSteps, validatedSpeed);
+        return;
+    }
+
+    // Parse regular add command: add m[motor] p[steps] s[speed]
     int addMotorNum = 0;
     long addSteps = 0;
     int addSpeed = 800;
@@ -1046,18 +1065,11 @@ void loop() {
     long timeStepsToMove = 0;
     unsigned long moveTime_ms = 0;
     int parsed_time_move = sscanf(command.c_str(), "m%d p%ld t%lu", &timeMotorNum, &timeStepsToMove, &moveTime_ms);
-    
-    // Parse time-based goto command: goto m[num] p[position] t[time_ms]
+      // Parse time-based goto command: goto m[num] p[position] t[time_ms]
     int gotoTimeMotorNum = 0;
     float gotoTimePosition = 0.0;
     unsigned long gotoTime_ms = 0;
     int parsed_goto_time = sscanf(command.c_str(), "goto m%d p%f t%lu", &gotoTimeMotorNum, &gotoTimePosition, &gotoTime_ms);
-    
-    // Parse time-based add command: add m[num] p[steps] t[time_ms]
-    int addTimeMotorNum = 0;
-    long addTimeSteps = 0;
-    unsigned long addTime_ms = 0;
-    int parsed_add_time = sscanf(command.c_str(), "add m%d p%ld t%lu", &addTimeMotorNum, &addTimeSteps, &addTime_ms);
 
     int motorNum = 0;
     long stepsToMove = 0;
@@ -1121,20 +1133,7 @@ void loop() {
         } else if (emergencyStopActive) {
             Serial.println("Cannot move motors during emergency stop.");
         } else {
-            startMotorMove(gotoTimeMotorNum-1, stepsToMove, validatedSpeed);
-        }
-        return;
-    } else if (parsed_add_time == 3 && addTimeMotorNum >= 1 && addTimeMotorNum <= 3) {
-        // Handle time-based add command: add m[num] p[steps] t[time_ms]
-        int calculatedSpeed = calculateSpeedFromTime(addTimeSteps, addTime_ms);
-        int validatedSpeed = validateSpeed(addTimeMotorNum - 1, calculatedSpeed);
-        
-        Serial.print("Time-based instruction - Motor: "); Serial.print(addTimeMotorNum);
-        Serial.print(" Steps: "); Serial.print(addTimeSteps);
-        Serial.print(" Time: "); Serial.print(addTime_ms); Serial.print("ms");
-        Serial.print(" Calculated Speed: "); Serial.println(validatedSpeed);
-        
-        addInstruction(addTimeMotorNum - 1, addTimeSteps, validatedSpeed);
+            startMotorMove(gotoTimeMotorNum-1, stepsToMove, validatedSpeed);        }
         return;
     } else if (parsed_move >= 2 && motorNum >= 1 && motorNum <= 3) { // p[steps] is mandatory, s[speed] is optional
       if (parsed_move == 2) {

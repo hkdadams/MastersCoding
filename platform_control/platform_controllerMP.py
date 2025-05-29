@@ -628,7 +628,7 @@ class PlatformController:
         z_offset_min = max(0, -min_z_traj)  # Force minimum z offset to be non-negative
         z_offset_max = self.leg_length - max_z_traj
         z_mid = (z_offset_min + z_offset_max) / 2
-          bounds = [
+        bounds = [
             (-self.leg_length, self.leg_length),  # x offset: ±leg_length
             (-0.0, 0.0),  # y offset: LOCKED to 0 (mechanically impossible)
             (z_offset_min, z_offset_max),  # z offset with new bounds (always non-negative)
@@ -636,7 +636,7 @@ class PlatformController:
             (-40, 40),    # pitch offset (degrees)
             (-0.0, 0.0)   # yaw offset: LOCKED to 0 (mechanically impossible)
         ]
-          print(f"\nOptimization bounds:")
+        print(f"\nOptimization bounds:")
         print(f"  X offset: ±{self.leg_length:.3f}m")
         print(f"  Y offset: 0m (mechanically locked)")
         print(f"  Z offset: [{z_offset_min:.3f}m, {z_offset_max:.3f}m]")

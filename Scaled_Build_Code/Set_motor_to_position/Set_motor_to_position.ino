@@ -22,7 +22,7 @@
 // Motor 3 (Using Serial2 for UART)
 #define DIR_PIN_3     10
 #define STEP_PIN_3    9
-#define EN_PIN_3      11 // Changed from D7 to avoid conflict with Serial2 RX2
+#define EN_PIN_3      15 // Changed from D7 and D11 to avoid conflict with Serial2 RX2 and MOSI
 // UART for M3: Serial2 (Teensy D8=TX2, D7=RX2)
 
 // --- DIAG Pin Definitions for Stall Detection ---

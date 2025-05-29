@@ -8,7 +8,7 @@ This script controls and optimizes the motion of a 3-leg parallel robotic platfo
 It processes trajectory data and calculates the required slider positions and joint angles for each leg
 to achieve the desired platform position and orientation in 3D space.
 
-IMPORTANT: This 3-leg design has exactly 4 degrees of freedom due to mechanical joint constraints,
+IMPORTANT: This 3-leg design has LIMITED degrees of freedom (~4-5 DOF) due to kinematic constraints,
 NOT the full 6 DOF typically associated with Stewart platforms (which usually have 6 legs).
 
 
@@ -47,29 +47,27 @@ COORDINATE SYSTEM:
 
 DOF CONSTRAINTS (IMPORTANT):
 ===========================
-This 3-leg platform has exactly 4 degrees of freedom due to mechanical joint constraints:
+This 3-leg platform CANNOT achieve full 6 degrees of freedom due to kinematic constraints:
 
 ACHIEVABLE MOTION:
 - X translation: Yes (full range)
-- Y translation: NO (mechanically impossible)
+- Y translation: SEVERELY LIMITED (Y offset must be ~0 due to optimization constraints)
 - Z translation: Yes (limited by leg length and geometry)
 - Roll: Yes (limited range, typically ±40°)
 - Pitch: Yes (limited range, typically ±40°)
-- Yaw: NO (mechanically impossible)
+- Yaw: SEVERELY LIMITED (constrained by symmetric geometry)
 
-MECHANICAL CONSTRAINTS:
-1. **Leg 1 Joint Constraint**: The joint connecting Leg 1 to the platform only allows:
-   - Rotation about the Y-axis (pitch motion)
-   - Roll about the line through the platform in the XZ plane
-   This mechanically prevents the platform from moving in Y or rotating in Yaw.
+KINEMATIC CONSTRAINTS:
+1. **Y-Motion Constraint**: The optimization bounds force Y offset to [-0.0, 0.0], 
+   meaning the platform center must remain on the XZ plane.
 
-2. **XZ Plane Constraint**: Leg 1 is constrained to move only in the XZ plane (Y=0),
-   which physically locks the platform's Y position and Yaw orientation.
+2. **Yaw Constraint**: The symmetric 3-leg arrangement with 120° spacing constrains
+   yaw rotation. Large yaw angles cause slider positions to go out of bounds.
 
-3. **Geometric Coupling**: The 3-leg arrangement with 120° spacing creates coupled
-   motion between the remaining degrees of freedom.
+3. **Coupled Motion**: Unlike a true 6-DOF system, the motions are coupled due to
+   the geometric constraints of only having 3 legs.
 
-EFFECTIVE DOF: Exactly 4 DOF (X translation, Z translation, Roll, Pitch)
+EFFECTIVE DOF: ~4-5 DOF (X, Z, Roll, Pitch, limited Y and Yaw)
 
 This makes it more accurately described as a "parallel manipulator with limited DOF"
 rather than a full Stewart platform (which typically has 6 legs for true 6-DOF).
@@ -139,14 +137,6 @@ import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from functools import partial
-
-# Import 4 DOF constraint validation functions
-try:
-    from constraint_validation import validate_4dof_constraints, enforce_4dof_constraints, get_achievable_dof_description
-except ImportError:
-    # Fallback if module not found
-    def validate_4dof_constraints(position, rotation_deg, leg_length, tolerance=1e-6):
-        return True, "Constraint validation module not found"
 import threading
 from multiprocessing import Value
 
@@ -364,18 +354,7 @@ class PlatformController:
             Tuple of (slider_positions, motor_angle, joint_angles)
         """
         slider_positions = np.zeros(3)
-          # Validate 4 DOF constraints before calculation
-        if platform_pos is not None and platform_rot is not None:
-            # Check Y constraint (should be 0)
-            if abs(platform_pos[1]) > 1e-6:
-                if debug:
-                    print(f"WARNING: Y position {platform_pos[1]:.6f}m violates 4 DOF constraint (should be 0)")
-            
-            # Check Yaw constraint (should be 0)  
-            if abs(platform_rot[2]) > 1e-6:
-                if debug:
-                    print(f"WARNING: Yaw rotation {platform_rot[2]:.6f}° violates 4 DOF constraint (should be 0)")
-
+        
         # Create rotation matrix from Euler angles if provided
         if platform_rot is not None:
             roll, pitch, yaw = np.radians(platform_rot)
@@ -394,16 +373,6 @@ class PlatformController:
         
         if debug:
             print("\n=== Debug: Slider Position Calculations ===")
-            # Validate and report 4 DOF compliance
-            if platform_pos is not None and platform_rot is not None:
-                print("4 DOF Constraint Check:")
-                print(f"  Y position: {platform_pos[1]:.6f}m (should be 0)")
-                print(f"  Yaw rotation: {platform_rot[2]:.6f}° (should be 0)")
-                if abs(platform_pos[1]) <= 1e-6 and abs(platform_rot[2]) <= 1e-6:
-                    print("  ✓ Constraints satisfied")
-                else:
-                    print("  ⚠ WARNING: Constraints violated")
-            
             if time is not None:
                 print(f"Time: {time:.3f}s")
             if platform_pos is not None:
@@ -628,29 +597,31 @@ class PlatformController:
         z_offset_min = max(0, -min_z_traj)  # Force minimum z offset to be non-negative
         z_offset_max = self.leg_length - max_z_traj
         z_mid = (z_offset_min + z_offset_max) / 2
-          bounds = [
+        
+        bounds = [
             (-self.leg_length, self.leg_length),  # x offset: ±leg_length
-            (-0.0, 0.0),  # y offset: LOCKED to 0 (mechanically impossible)
+            (-0.0, 0.0),  # y offset
             (z_offset_min, z_offset_max),  # z offset with new bounds (always non-negative)
             (-40, 40),    # roll offset (degrees)
             (-40, 40),    # pitch offset (degrees)
-            (-0.0, 0.0)   # yaw offset: LOCKED to 0 (mechanically impossible)
+            (-40, 40)     # yaw offset (degrees)
         ]
-          print(f"\nOptimization bounds:")
+        
+        print(f"\nOptimization bounds:")
         print(f"  X offset: ±{self.leg_length:.3f}m")
-        print(f"  Y offset: 0m (mechanically locked)")
+        print(f"  Y offset: ±0m")
         print(f"  Z offset: [{z_offset_min:.3f}m, {z_offset_max:.3f}m]")
         print(f"  Z mid-point: {z_mid:.3f}m")
-        print(f"  Roll/Pitch offsets: ±40 degrees")
-        print(f"  Yaw offset: 0° (mechanically locked)")
+        print(f"  Rotation offsets: ±40 degrees")
         print(f"\nTrajectory ranges:")
         print(f"  Original z range: [{min_z_traj:.3f}m, {max_z_traj:.3f}m]")
         print(f"\nUsing {num_cores} CPU cores for optimization")
-          # Create systematic initial guesses - respecting 4 DOF constraints
+        
+        # Create systematic initial guesses
         initial_guesses = [
             np.array([0.0, 0.0, z_mid, 0.0, 0.0, 0.0]),     # All centered
-            np.array([self.leg_length/2, 0.0, z_mid, 20.0, 20.0, 0.0]),   # Positive half-range (Y,Yaw locked)
-            np.array([-self.leg_length/2, 0.0, z_mid, -20.0, -20.0, 0.0]), # Negative half-range (Y,Yaw locked)
+            np.array([self.leg_length/2, 0.0, z_mid, 20.0, 20.0, 20.0]),   # Positive half-range
+            np.array([-self.leg_length/2, 0.0, z_mid, -20.0, -20.0, -20.0]), # Negative half-range
             np.array([0.0, 0.0, z_mid*1.2, 0.0, 0.0, 0.0]),  # Slight higher Z
             np.array([0.0, 0.0, z_mid*0.8, 0.0, 0.0, 0.0])  # Slight lower Z
         ]

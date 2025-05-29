@@ -8,6 +8,20 @@ import math
 from tqdm import tqdm
 import os
 
+# Import constraint validation functions
+try:
+    from constraint_validation import validate_4dof_constraints, enforce_4dof_constraints, get_achievable_dof_description
+except ImportError:
+    print("Warning: constraint_validation module not found. Constraint validation will be limited.")
+    def validate_4dof_constraints(*args, **kwargs):
+        return True, ""
+    def enforce_4dof_constraints(pose):
+        pose[1] = 0.0  # Y = 0
+        pose[5] = 0.0  # Yaw = 0
+        return pose
+    def get_achievable_dof_description():
+        return "4 DOF: X, Z, Roll, Pitch (Y and Yaw mechanically impossible)"
+
 class PlatformController:
     def __init__(self, leg_length: float, rail_max_travel: float):
         """
@@ -155,8 +169,7 @@ class PlatformController:
             Tuple of (slider_positions, motor_angle, joint_angles)
         """
         slider_positions = np.zeros(3)
-        
-        # Create rotation matrix from Euler angles if provided
+          # Create rotation matrix from Euler angles if provided
         if platform_rot is not None:
             roll, pitch, yaw = np.radians(platform_rot)
             Rx = np.array([[1, 0, 0],
@@ -174,6 +187,16 @@ class PlatformController:
         
         if debug:
             print("\n=== Debug: Slider Position Calculations ===")
+            # Validate 4 DOF constraints before calculation
+            if platform_pos is not None and platform_rot is not None:
+                # Check Y constraint (should be 0)
+                if abs(platform_pos[1]) > 1e-6:
+                    print(f"WARNING: Y position {platform_pos[1]:.6f}m violates 4 DOF constraint (should be 0)")
+                
+                # Check Yaw constraint (should be 0)
+                if abs(platform_rot[2]) > 1e-6:
+                    print(f"WARNING: Yaw rotation {platform_rot[2]:.6f}° violates 4 DOF constraint (should be 0)")
+
             if time is not None:
                 print(f"Time: {time:.3f}s")
             if platform_pos is not None:
@@ -414,40 +437,40 @@ class PlatformController:
         # Get minimum and maximum z positions from trajectory
         min_z_traj = trajectory_df['z'].min()
         max_z_traj = trajectory_df['z'].max()
-        
-        # Calculate z offset bounds
+          # Calculate z offset bounds
         z_offset_min = max(-min_z_traj, -self.leg_length/2)
         z_offset_max = min(self.leg_length - max_z_traj, self.leg_length/2)
         
         # Calculate mid-points
         z_mid = (z_offset_min + z_offset_max) / 2
         
-        # Bounds for optimization
+        # Bounds for optimization - enforcing 4 DOF constraints
         bounds = [
             (-self.leg_length, self.leg_length),  # x offset: ±leg_length
-            (-0.2, 0.2),  # y offset
+            (-0.0, 0.0),  # y offset: LOCKED to 0 (mechanically impossible)
             (z_offset_min, z_offset_max),  # z offset with new bounds
             (-40, 40),    # roll offset (degrees)
             (-40, 40),    # pitch offset (degrees)
-            (-40, 40)     # yaw offset (degrees)
+            (-0.0, 0.0)   # yaw offset: LOCKED to 0 (mechanically impossible)
         ]
         
         print(f"\nOptimization bounds:")
         print(f"  X offset: ±{self.leg_length:.3f}m")
-        print(f"  Y offset: ±0.2m")
+        print(f"  Y offset: 0m (mechanically locked)")
         print(f"  Z offset: [{z_offset_min:.3f}m, {z_offset_max:.3f}m]")
         print(f"  Z mid-point: {z_mid:.3f}m")
-        print(f"  Rotation offsets: ±40 degrees")
+        print(f"  Roll/Pitch offsets: ±40 degrees")
+        print(f"  Yaw offset: 0° (mechanically locked)")
         print(f"\nTrajectory ranges:")
         print(f"  Original z range: [{min_z_traj:.3f}m, {max_z_traj:.3f}m]")
         
-        # Create systematic initial guesses
+        # Create systematic initial guesses - respecting 4 DOF constraints
         initial_guesses = [
             np.array([0.0, 0.0, z_mid, 0.0, 0.0, 0.0]),     # All centered
-            np.array([self.leg_length/2, 0.0, z_mid, 20.0, 20.0, 20.0]),   # Positive half-range
-            np.array([-self.leg_length/2, 0.0, z_mid, -20.0, -20.0, -20.0]), # Negative half-range
-            np.array([0.0, 0.1, z_mid*1.1, 0.0, 0.0, 0.0]),  # Slight Y offset and higher Z
-            np.array([0.0, -0.1, z_mid*0.9, 0.0, 0.0, 0.0])  # Slight negative Y offset and lower Z
+            np.array([self.leg_length/2, 0.0, z_mid, 20.0, 20.0, 0.0]),   # Positive half-range (Y,Yaw locked)
+            np.array([-self.leg_length/2, 0.0, z_mid, -20.0, -20.0, 0.0]), # Negative half-range (Y,Yaw locked)
+            np.array([0.0, 0.0, z_mid*1.1, 0.0, 0.0, 0.0]),  # Higher Z
+            np.array([0.0, 0.0, z_mid*0.9, 0.0, 0.0, 0.0])  # Lower Z
         ]
         
         best_result = None

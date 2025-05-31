@@ -1,3 +1,4 @@
+
 """
 PLATFORM CONTROLLER WITH MULTIPROCESSING
 
@@ -212,21 +213,19 @@ def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]
         }
 
 class PlatformController:
-    def __init__(self, leg_length: float, rail_max_travel: float, slider_min_travel_offset: float, log_file_path: str, log_attempts: bool = True):
+    def __init__(self, leg_length: float, rail_max_travel: float, log_file_path: str, log_attempts: bool = True):
         """
         Initialize the platform controller with geometric parameters
         
         Args:
             leg_length: Length of each leg in meters
             rail_max_travel: Maximum travel distance of each slider in meters
-            slider_min_travel_offset: Minimum travel offset for sliders
             log_file_path: Path to the debug log file
             log_attempts: Whether to log individual optimization attempts (default: True)
         """
         self.leg_length = leg_length
-        self.rail_max_travel = rail_max_travel  # This is the effective travel length
-        self.slider_min_travel_offset = slider_min_travel_offset # This is the absolute start coordinate of the travel
-        self.L_squared = leg_length**2
+        self.rail_max_travel = rail_max_travel
+        self.L_squared = leg_length * leg_length
         self.log_attempts = log_attempts
         
         # Add offset parameters
@@ -501,17 +500,6 @@ class PlatformController:
                 print(f"    Leg vector: ({leg_vector[0]:.3f}, {leg_vector[1]:.3f}, {leg_vector[2]:.3f})m")
                 print(f"    Actual leg length: {actual_length:.3f}m (should be {self.leg_length:.3f}m)")
                 print(f"    Length error: {(actual_length - self.leg_length)*1000:.2f}mm")
-        
-        # Apply physical slider travel limits based on the new offset
-        min_abs_pos = self.slider_min_travel_offset
-        max_abs_pos = self.slider_min_travel_offset + self.rail_max_travel
-        
-        original_slider_positions_before_clamping = slider_positions.copy() # For potential debug
-
-        slider_positions = np.clip(slider_positions, min_abs_pos, max_abs_pos)
-
-        if debug and np.any(slider_positions != original_slider_positions_before_clamping):
-            print(f"DEBUG: Slider positions clamped. Original: {original_slider_positions_before_clamping}, Clamped: {slider_positions}, Allowed Range: [{min_abs_pos:.3f}, {max_abs_pos:.3f}]")
         
         if debug:
             print(f"\nFinal slider positions at t={time:.3f}s:" if time is not None else "\nFinal slider positions:", [f"{pos:.3f}m" for pos in slider_positions])
@@ -951,10 +939,12 @@ class PlatformController:
                 Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
                              [np.sin(yaw), np.cos(yaw), 0],
                              [0, 0, 1]])
-                rotation = Rz @ Ry @ Rx                # Optimize platform orientation
+                rotation = Rz @ Ry @ Rx
+
+                # Optimize platform orientation
                 opt_position, opt_rotation = self.optimize_platform_orientation(position, rotation, time=row['time'])
                 opt_angles = Rotation.from_matrix(opt_rotation).as_euler('xyz', degrees=True)
-                
+
                 # Calculate slider positions and motor angle
                 platform_points = self.transform_platform_points(opt_position, opt_rotation)
                 slider_positions, motor_angle, joint_angles = self.calculate_slider_positions(
@@ -977,47 +967,10 @@ class PlatformController:
                     velocities = np.zeros(3)
                     accelerations = np.zeros(3)
 
-                # Calculate motor torque for slider 1
-                try:
-                    # Calculate platform acceleration for dynamics (if available)
-                    if len(all_results) > 1:
-                        # Calculate platform acceleration from position data
-                        prev_pos = all_results[-1]['platform_position']
-                        prev_prev_pos = all_results[-2]['platform_position']
-                        platform_velocity = (opt_position - prev_pos) / dt
-                        prev_velocity = (prev_pos - prev_prev_pos) / dt
-                        platform_acceleration = (platform_velocity - prev_velocity) / dt
-                        
-                        # Calculate angular acceleration from rotation data
-                        prev_rot = all_results[-1]['platform_rotation']
-                        prev_prev_rot = all_results[-2]['platform_rotation']
-                        angular_velocity = np.radians((opt_angles - prev_rot) / dt)
-                        prev_angular_velocity = np.radians((prev_rot - prev_prev_rot) / dt)
-                        angular_acceleration = (angular_velocity - prev_angular_velocity) / dt
-                        
-                        # Calculate torque with dynamics
-                        motor_torque = self.calculate_motor_torque_with_dynamics(
-                            platform_points, slider_positions,
-                            platform_velocity=platform_velocity,
-                            platform_acceleration=platform_acceleration,
-                            angular_velocity=angular_velocity,
-                            angular_acceleration=angular_acceleration,
-                            platform_mass=10.0  # Assume 10kg platform mass
-                        )
-                    else:
-                        # For first few points, use static calculation only
-                        leg_forces = self.calculate_leg_forces(platform_points, slider_positions, platform_mass=10.0)
-                        motor_torque = self.calculate_motor_torque_slider1(platform_points, slider_positions, leg_forces)
-                        
-                except Exception as e:
-                    print(f"Warning: Motor torque calculation failed at time {row['time']:.3f}s: {e}")
-                    motor_torque = 0.0
-
                 all_results.append({
                     'time': row['time'],
                     'slider_positions': slider_positions,
                     'motor_angle': motor_angle,
-                    'motor_torque_slider1': motor_torque,  # Add motor torque
                     'velocities': velocities,
                     'accelerations': accelerations,
                     'joint_angles': joint_angles,
@@ -1050,19 +1003,17 @@ class PlatformController:
         all_results.sort(key=lambda x: x['time'])
 
         # Create DataFrame with results
-        results_df = pd.DataFrame(all_results)        # Update the export logic to use the new output file name
+        results_df = pd.DataFrame(all_results)
+
+        # Update the export logic to use the new output file name
         print(f"\nExporting results to {os.path.abspath(output_file)}...")
-        
         with ThreadPoolExecutor() as executor:
             executor.submit(self.export_results_to_excel, results_df, output_file, auto_overwrite)
-        
+
         print(f"\nResults successfully exported to {os.path.abspath(output_file)}")
         print("\nKey Statistics:")
         print(f"Peak Velocity: {results_df['velocity1'].max():.3f} m/s")
         print(f"Peak Acceleration: {results_df['acceleration1'].max():.3f} m/s²")
-        print(f"Peak Motor Torque (Slider 1): {results_df['motor_torque_slider1'].max():.3f} N⋅m")
-        print(f"Min Motor Torque (Slider 1): {results_df['motor_torque_slider1'].min():.3f} N⋅m")
-        print(f"RMS Motor Torque (Slider 1): {np.sqrt(np.mean(results_df['motor_torque_slider1']**2)):.3f} N⋅m")
 
         return results_df
 
@@ -1274,165 +1225,6 @@ class PlatformController:
         
         plt.tight_layout()
         plt.show()
-
-    def calculate_leg_forces(self, platform_points: List[np.ndarray], slider_positions: np.ndarray, 
-                            platform_mass: float, external_forces: np.ndarray = None, 
-                            external_moments: np.ndarray = None) -> np.ndarray:
-        """
-        Calculate the forces each leg must exert on the platform for static equilibrium
-        
-        Args:
-            platform_points: Platform attachment points in world coordinates
-            slider_positions: Current slider positions
-            platform_mass: Mass of the platform in kg
-            external_forces: External forces on platform [Fx, Fy, Fz] in N
-            external_moments: External moments on platform [Mx, My, Mz] in N⋅m
-            
-        Returns:
-            Array of leg force magnitudes [F1, F2, F3] in N
-        """
-        # Calculate leg unit vectors
-        leg_vectors = []
-        leg_unit_vectors = []
-        
-        for i in range(3):
-            slider_pos = self.rail_vectors[i] * slider_positions[i]
-            leg_vector = platform_points[i] - slider_pos
-            leg_length = np.linalg.norm(leg_vector)
-            leg_unit = leg_vector / leg_length
-            
-            leg_vectors.append(leg_vector)
-            leg_unit_vectors.append(leg_unit)
-        
-        # Set up equilibrium equations
-        # Force equilibrium: sum of leg forces + weight + external forces = 0
-        # Moment equilibrium: sum of moments about platform center = 0
-        
-        # Weight force (downward)
-        weight = np.array([0, 0, -platform_mass * 9.81])
-        
-        # External forces (if any)
-        if external_forces is None:
-            external_forces = np.zeros(3)
-        if external_moments is None:
-            external_moments = np.zeros(3)
-        
-        # Create matrix for force equilibrium (3 equations)
-        # Each column represents the unit vector of one leg
-        A_force = np.column_stack(leg_unit_vectors)
-        
-        # Right-hand side: negative of (weight + external forces)
-        b_force = -(weight + external_forces)
-        
-        # Create matrix for moment equilibrium (3 equations)
-        # Moment = position_vector × force_vector
-        platform_center = np.mean(platform_points, axis=0)
-        A_moment = np.zeros((3, 3))
-        
-        for i in range(3):
-            r_vector = platform_points[i] - platform_center
-            # Moment contribution from leg i with unit force
-            moment_contribution = np.cross(r_vector, leg_unit_vectors[i])
-            A_moment[:, i] = moment_contribution
-        
-        # Right-hand side: negative external moments
-        b_moment = -external_moments
-        
-        # Combine force and moment equations
-        A = np.vstack([A_force, A_moment])
-        b = np.concatenate([b_force, b_moment])
-          # Solve for leg forces (this system may be over-determined)
-        leg_forces, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
-        
-        return leg_forces
-
-    def calculate_motor_torque_slider1(self, platform_points: List[np.ndarray], 
-                                     slider_positions: np.ndarray, leg_forces: np.ndarray) -> float:
-        """
-        Calculate the torque required by the motor on slider 1 for the nodding motion
-        
-        Args:
-            platform_points: Platform attachment points in world coordinates
-            slider_positions: Current slider positions
-            leg_forces: Force magnitudes for each leg [F1, F2, F3] in N
-            
-        Returns:
-            Motor torque in N⋅m (positive = nose up rotation about Y-axis)
-        """
-        # Get slider 1 position and leg vector
-        slider1_pos = self.rail_vectors[0] * slider_positions[0]  # [s1, 0, 0]
-        leg1_vector = platform_points[0] - slider1_pos
-        leg1_length = np.linalg.norm(leg1_vector)
-        
-        # Leg force components
-        leg1_force_magnitude = leg_forces[0]
-        leg1_force_vector = leg1_force_magnitude * (leg1_vector / leg1_length)
-        
-        # Calculate motor torque using the moment arm approach
-        # The motor is at the slider position and rotates about the Y-axis
-        # Position vector from motor axis (slider position) to platform attachment point
-        r_vector = leg1_vector  # From slider to platform attachment point
-        
-        # Motor torque = r × F, but we only care about Y-component (rotation about Y-axis)
-        # For rotation about Y-axis: τ_y = r_z * F_x - r_x * F_z
-        motor_torque = r_vector[2] * leg1_force_vector[0] - r_vector[0] * leg1_force_vector[2]
-        
-        return motor_torque
-
-    def calculate_motor_torque_with_dynamics(self, platform_points: List[np.ndarray], 
-                                           slider_positions: np.ndarray, 
-                                           platform_velocity: np.ndarray = None, 
-                                           platform_acceleration: np.ndarray = None,
-                                           angular_velocity: np.ndarray = None,
-                                           angular_acceleration: np.ndarray = None,
-                                           platform_mass: float = 10.0,
-                                           platform_inertia: np.ndarray = None) -> float:
-        """
-        Calculate motor torque for slider 1 including dynamic effects
-        
-        Args:
-            platform_points: Platform attachment points
-            slider_positions: Current slider positions  
-            platform_velocity: Platform velocity [vx, vy, vz] in m/s (optional)
-            platform_acceleration: Platform acceleration [ax, ay, az] in m/s² (optional)
-            angular_velocity: Angular velocity [wx, wy, wz] in rad/s (optional)
-            angular_acceleration: Angular acceleration [αx, αy, αz] in rad/s² (optional)
-            platform_mass: Platform mass in kg
-            platform_inertia: 3x3 inertia matrix in kg⋅m² (optional)
-            
-        Returns:
-            Motor torque in N⋅m
-        """
-        if platform_inertia is None:
-            # Estimate inertia for triangular platform
-            I = platform_mass * self.PLATFORM_RADIUS**2 / 6
-            platform_inertia = np.diag([I, I, I])
-        
-        # Initialize inertial forces and moments to zero if not provided
-        inertial_force = np.zeros(3)
-        inertial_moment = np.zeros(3)
-        
-        # Calculate inertial forces and moments if accelerations are provided
-        if platform_acceleration is not None:
-            inertial_force = -platform_mass * platform_acceleration
-        
-        if angular_acceleration is not None and angular_velocity is not None:
-            inertial_moment = -(platform_inertia @ angular_acceleration + 
-                               np.cross(angular_velocity, platform_inertia @ angular_velocity))
-        elif angular_acceleration is not None:
-            inertial_moment = -platform_inertia @ angular_acceleration
-        
-        # Calculate leg forces with inertial effects
-        leg_forces = self.calculate_leg_forces(
-            platform_points, slider_positions, platform_mass,
-            external_forces=inertial_force,
-            external_moments=inertial_moment
-        )
-        
-        # Calculate motor torque
-        return self.calculate_motor_torque_slider1(
-            platform_points, slider_positions, leg_forces
-        )
 
 def main():
     # Get the Excel file path from user input

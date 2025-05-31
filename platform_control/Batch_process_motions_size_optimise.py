@@ -19,7 +19,7 @@ from platform_controllerMP import PlatformController  # Using the MP version
 
 def process_file(args):
     """Process a single Excel file with combined rail and leg length optimization"""
-    file_path, zero_config = args
+    file_path, zero_config, slider_min_travel_offset = args
     try:
         # Read the Excel file
         df = pd.read_excel(file_path)
@@ -52,11 +52,23 @@ def process_file(args):
         print(f"Position (x,y,z): ({trajectory_df['x'].iloc[0]:.3f}, {trajectory_df['y'].iloc[0]:.3f}, {trajectory_df['z'].iloc[0]:.3f})m")
         print(f"Rotation (r,p,y): ({trajectory_df['roll'].iloc[0]:.1f}, {trajectory_df['pitch'].iloc[0]:.1f}, {trajectory_df['yaw'].iloc[0]:.1f})°")
         
-        def test_configuration(leg_length, rail_length):
+        def test_configuration(leg_length, rail_length, current_slider_min_travel_offset):
             """Helper function to test a specific configuration"""
             try:
-                # Create controller with current parameters
-                controller = PlatformController(leg_length, rail_length)
+                # Create controller with current configuration
+                # Ensure log_file_path is defined or passed appropriately if needed by PlatformController
+                # For this example, assuming a generic or temp log path for optimization runs,
+                # or that PlatformController handles a None path.
+                log_file_path_for_test = os.path.join(os.path.dirname(file_path), "platform_outputs", f"debug_log_opt_{os.path.basename(file_path).replace('.xlsx','')}.txt")
+                os.makedirs(os.path.dirname(log_file_path_for_test), exist_ok=True)
+
+                controller = PlatformController(
+                    leg_length=leg_length, 
+                    rail_max_travel=rail_length,
+                    slider_min_travel_offset=current_slider_min_travel_offset,
+                    log_file_path=log_file_path_for_test, # Ensure this path is valid
+                    log_attempts=False # Typically false during these optimization loops
+                )
                 
                 # Process without optimization first to get baseline
                 results_df_no_opt = controller.process_trajectory(trajectory_df, file_path=file_path, apply_optimization=False)
@@ -110,7 +122,7 @@ def process_file(args):
             
             for leg_length in coarse_lengths:
                 print(f"\nTrying leg length: {leg_length:.2f}m")
-                result = test_configuration(leg_length, rail_length)
+                result = test_configuration(leg_length, rail_length, slider_min_travel_offset)
                 if result and result['feasible']:
                     phase1_results.append(result)
                     print(f"Score: {result['score']:.3f}")
@@ -137,7 +149,7 @@ def process_file(args):
                 if leg_length in coarse_lengths:  # Skip if already tested
                     continue
                 print(f"\nTrying leg length: {leg_length:.2f}m")
-                result = test_configuration(leg_length, rail_length)
+                result = test_configuration(leg_length, rail_length, slider_min_travel_offset)
                 if result and result['feasible']:
                     phase2_results.append(result)
                     print(f"Score: {result['score']:.3f}")
@@ -210,8 +222,12 @@ def main():
     for component, is_zeroed in zero_config.items():
         print(f"{component}: {'Yes' if is_zeroed else 'No'}")
     
+    # Get slider_min_travel_offset
+    slider_min_travel_offset = float(input("\nEnter slider minimum travel offset in meters (default 0.0): ") or "0.0")
+    print(f"Using slider minimum travel offset: {slider_min_travel_offset:.3f}m")
+
     # Create arguments for each file (note: rail_max_travel is handled inside process_file for optimization)
-    process_args = [(f, zero_config) for f in file_paths]
+    process_args = [(f, zero_config, slider_min_travel_offset) for f in file_paths]
     
     # Use half the available cores to avoid system overload
     num_processes = max(1, mp.cpu_count() // 2)

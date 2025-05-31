@@ -15,7 +15,7 @@ def cleanup_memory():
 
 def process_file(args):
     """Process a single Excel file with pre-processed position and orientation data"""
-    file_path, leg_length, rail_max_travel, enable_logging = args
+    file_path, leg_length, rail_max_travel, slider_min_travel_offset, enable_logging = args
     error_details = {}
     start_time = pd.Timestamp.now()
     df = None
@@ -55,7 +55,7 @@ def process_file(args):
         trajectory_df['time'] = trajectory_df['time'] / 1000.0
         
         # Create controller and process
-        controller = PlatformController(leg_length, rail_max_travel, log_file_path, log_attempts=enable_logging)
+        controller = PlatformController(leg_length, rail_max_travel, slider_min_travel_offset, log_file_path, log_attempts=enable_logging)
         
         # Process without optimization first
         results_df_no_opt = controller.process_trajectory(
@@ -185,12 +185,13 @@ def main():
     # Get geometric parameters
     leg_length = float(input("\nEnter leg length in meters (default 0.3): ") or "0.3")
     rail_max_travel = float(input("Enter maximum rail travel in meters (default 0.5): ") or "0.5")
+    slider_min_travel_offset = float(input("Enter slider minimum travel offset in meters (default 0.0): ") or "0.0")
     
     # Add logging option
     enable_logging = input("\nEnable optimization logging? (y/N): ").lower().startswith('y')
     
     # Create arguments for each file
-    process_args = [(f, leg_length, rail_max_travel, enable_logging) for f in file_paths]
+    process_args = [(f, leg_length, rail_max_travel, slider_min_travel_offset, enable_logging) for f in file_paths]
     
     print(f"\nProcessing {len(file_paths)} files sequentially...")
     start_time = pd.Timestamp.now()

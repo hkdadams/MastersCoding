@@ -95,6 +95,7 @@ def process_file(args):
         # Calculate improvements
         peak_velocities = max(max(abs(v)) for v in results_df['velocities'])
         peak_accelerations = max(max(abs(a)) for a in results_df['accelerations'])
+        peak_torque_slider1 = results_df['Motor Torque Slider 1 (Nm)'].abs().max() # Added
         
         vel_improvement = (peak_velocities_no_opt - peak_velocities) / peak_velocities_no_opt * 100
         acc_improvement = (peak_accelerations_no_opt - peak_accelerations) / peak_accelerations_no_opt * 100
@@ -103,8 +104,9 @@ def process_file(args):
         print(f"Processing complete in {processing_time:.1f} seconds")
         print(f"Velocity reduction: {vel_improvement:.1f}%")
         print(f"Acceleration reduction: {acc_improvement:.1f}%")
+        print(f"Peak Torque Slider 1 (Optimized): {peak_torque_slider1:.2f} Nm") # Added
         
-        return True, file_path, None
+        return True, file_path, None, peak_torque_slider1 # Modified
         
     except Exception as e:
         error_details['error'] = str(e)
@@ -118,11 +120,12 @@ def process_file(args):
                 error_log.write(f"Time: {pd.Timestamp.now()}\n")
                 error_log.write(f"Duration: {(pd.Timestamp.now() - start_time).total_seconds():.1f}s\n")
                 error_log.write(f"Error: {str(e)}\n")
+                error_log.write(f"Optimized Peak Torque Slider 1: N/A due to error\n") # Added
                 error_log.write(f"{'='*50}\n")
         except Exception as log_error:
             print(f"Failed to write to error log: {str(log_error)}")
             
-        return False, file_path, error_details
+        return False, file_path, error_details, np.nan # Modified
         
     finally:
         # Clean up DataFrames
@@ -200,16 +203,27 @@ def main():
     successful = 0
     failed = 0
     failed_files = []
+    summary_data = [] # Added
     
     try:
         # Create a progress bar for sequential processing
         for i, args in enumerate(tqdm(process_args, desc="Processing files", unit="file")):
-            success, file_path, error_details = process_file(args)
+            success, file_path, error_details, peak_torque = process_file(args) # Modified
             if success:
                 successful += 1
+                summary_data.append({ # Added
+                    'file_name': os.path.basename(file_path),
+                    'status': 'Success',
+                    'peak_torque_slider1_opt': peak_torque
+                })
             else:
                 failed += 1
                 failed_files.append((file_path, error_details))
+                summary_data.append({ # Added
+                    'file_name': os.path.basename(file_path),
+                    'status': 'Failed',
+                    'peak_torque_slider1_opt': np.nan 
+                })
                 print(f"\nError processing {os.path.basename(file_path)}:")
                 for error_type, error_msg in error_details.items():
                     print(f"  {error_type}: {error_msg}")
@@ -230,6 +244,18 @@ def main():
         # Calculate total processing time
         total_time = (pd.Timestamp.now() - start_time).total_seconds()
         
+        # Create summary DataFrame and save to Excel
+        if summary_data: # Added
+            summary_df = pd.DataFrame(summary_data) # Added
+            summary_output_dir = os.path.join(dir_path, "platform_outputs") # Added
+            os.makedirs(summary_output_dir, exist_ok=True) # Added
+            summary_excel_path = os.path.join(summary_output_dir, "batch_processing_summary_results.xlsx") # Added
+            try: # Added
+                summary_df.to_excel(summary_excel_path, index=False, sheet_name="Summary") # Added
+                print(f"\nBatch processing summary saved to: {summary_excel_path}") # Added
+            except Exception as e: # Added
+                print(f"\nError saving summary Excel: {e}") # Added
+
         # Print summary
         print(f"\nProcessing complete!")
         print(f"Total processing time: {total_time/60:.1f} minutes")

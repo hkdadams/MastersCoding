@@ -347,7 +347,6 @@ class PlatformController:
                 'phi': math.degrees(phi),
                 'psi': math.degrees(np.arctan2(leg_vector[1], leg_vector[0]))  # Rotation around connection point
             })
-        
         return angles
 
     def calculate_slider_positions(self, platform_points: List[np.ndarray], time: float = None, platform_pos: np.ndarray = None, platform_rot: np.ndarray = None, debug: bool = True) -> Tuple[np.ndarray, float, dict]:
@@ -1140,6 +1139,7 @@ class PlatformController:
                     'Slider 2 (m)': results_df['slider2'],
                     'Slider 3 (m)': results_df['slider3'],
                     'Motor Angle (deg)': results_df['motor_angle'],
+                    'Motor Torque Slider 1 (Nm)': results_df['motor_torque_slider1'], # Added torque data
                     'Platform X (m)': results_df['x'],
                     'Platform Y (m)': results_df['y'],
                     'Platform Z (m)': results_df['z'],

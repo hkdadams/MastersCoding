@@ -64,26 +64,29 @@ def process_file(file_path):
     return peak_lin_acc, peak_rot_acc
 
 def get_files_interactively():
-    """Prompt the user to input file paths interactively."""
+    """Prompt the user to input file paths or folder paths interactively."""
     excel_files = []
-    print("Enter the file paths (one per line). Enter an empty line when done:")
-    
+    print("Enter the file paths or folder paths (one per line). Enter an empty line when done:")
+
     while True:
-        file_path = input("> ").strip()
-        if not file_path:
+        input_path = input("> ").strip()
+        if not input_path:
             break
-            
+
         # Handle paths with or without quotes
-        file_path = file_path.strip('"\'')
-        
-        if os.path.exists(file_path):
-            if file_path.lower().endswith('.xlsx'):
-                excel_files.append(file_path)
+        input_path = input_path.strip('"\'')
+
+        if os.path.exists(input_path):
+            if os.path.isdir(input_path):
+                # If it's a folder, retrieve all Excel files from the folder
+                excel_files.extend(get_files_from_folder(input_path))
+            elif input_path.lower().endswith(('.xls', '.xlsx')):
+                excel_files.append(input_path)
             else:
-                print(f"Skipping {file_path}: Not an Excel file (must end with .xlsx)")
+                print(f"Skipping {input_path}: Not an Excel file or folder")
         else:
-            print(f"Skipping {file_path}: File not found")
-    
+            print(f"Skipping {input_path}: Path not found")
+
     return excel_files
 
 def get_files_from_folder(folder_path):
@@ -92,21 +95,24 @@ def get_files_from_folder(folder_path):
         print(f"Folder not found: {folder_path}")
         return []
 
-    excel_files = glob.glob(os.path.join(folder_path, "*.xlsx"))
+    # Include all files in the folder and filter for Excel files
+    all_files = glob.glob(os.path.join(folder_path, "*"))
+    excel_files = [file for file in all_files if file.endswith(('.xls', '.xlsx'))]
+
     if not excel_files:
         print(f"No Excel files found in folder: {folder_path}")
     return excel_files
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze rugby head motion data from Excel files.')
-    parser.add_argument('files', nargs='*', help='Excel files to process or a folder containing Excel files')
+    parser.add_argument('inputs', nargs='*', help='Excel files or folders containing Excel files to process')
     parser.add_argument('-o', '--output', help='Output CSV filename for summary results')
     args = parser.parse_args()
 
     excel_files = []
 
-    # Check if the input is a folder
-    for input_path in args.files:
+    # Check if the input is a folder or file
+    for input_path in args.inputs:
         if os.path.isdir(input_path):
             excel_files.extend(get_files_from_folder(input_path))
         elif os.path.isfile(input_path) and input_path.lower().endswith('.xlsx'):
@@ -169,13 +175,13 @@ def main():
         print(f"  Max:    {results_df['peak_rotational_acc_rads2'].max():.2f}")
         print(f"  Median: {results_df['peak_rotational_acc_rads2'].median():.2f}")
         print(f"  Count:  {results_df['peak_rotational_acc_rads2'].count()}")
-        
+
         # Output detailed results to a CSV file
         if args.output:
             output_filename = args.output
         else:
             output_filename = "rugby_head_motion_peak_accelerations_summary.csv"
-        
+
         try:
             results_df.to_csv(output_filename, index=False, float_format='%.4f')
             print(f"\nDetailed results saved to: {os.path.abspath(output_filename)}")

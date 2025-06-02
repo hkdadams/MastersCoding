@@ -1,0 +1,52 @@
+BATCH PROCESSING ANALYSIS RESULTS
+==================================================
+
+Processing Summary:
+Total Files Processed: 3
+Successfully Processed: 2
+Failed: 1
+Total Processing Time: 3.0 minutes
+Average Time per File: 60.2 seconds
+
+Velocity Reduction Analysis:
+Mean Reduction: 12.10%
+Median Reduction: 12.10%
+Standard Deviation: 4.50%
+Minimum Reduction: 8.90%
+Maximum Reduction: 15.30%
+
+Acceleration Reduction Analysis:
+Mean Reduction: 20.40%
+Median Reduction: 20.40%
+Standard Deviation: 3.30%
+Minimum Reduction: 18.10%
+Maximum Reduction: 22.70%
+
+Slider Limit Violation Analysis:
+Files with Slider Violations: 1
+Total Successful Files: 2
+Violation Percentage: 50.0%
+
+Detailed Violation List:
+File: Rugby_test_2.xlsx
+Violated Sliders: Slider 1, Slider 3
+  Slider 1: min(0.0001m)
+  Slider 3: max(0.4999m)
+
+==================================================
+PER-FILE ANALYSIS SUMMARY
+==================================================
+
+Successful Files (Ranked by Velocity Improvement):
+--------------------------------------------------
+ 1. Rugby_test_1.xlsx
+    Velocity Reduction: 15.30%
+    Acceleration Reduction: 22.70%
+    Peak Torque (Slider 1): 12.50 Nm
+    Processing Time: 45.2s
+
+ 2. Rugby_test_2.xlsx
+    Velocity Reduction: 8.90%
+    Acceleration Reduction: 18.10%
+    Peak Torque (Slider 1): 15.80 Nm
+    Processing Time: 52.1s

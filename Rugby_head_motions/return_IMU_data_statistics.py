@@ -160,7 +160,7 @@ def main():
 
     print("\n\n--- Aggregate Statistics ---")
     if not results_df.empty:
-        print("\nPeak Linear Accelerations (m/s^2):")
+        print("\nPeak Linear Accelerations (g):")
         print(f"  Mean:   {results_df['peak_linear_acc_mps2'].mean():.2f}")
         print(f"  Std Dev:{results_df['peak_linear_acc_mps2'].std():.2f}")
         print(f"  Min:    {results_df['peak_linear_acc_mps2'].min():.2f}")

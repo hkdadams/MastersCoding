@@ -5,12 +5,12 @@
 import os
 import pandas as pd
 import numpy as np
+import gc
 from tqdm import tqdm
 from platform_controllerMP import PlatformController
 
 def cleanup_memory():
     """Force garbage collection to free memory between files"""
-    import gc
     gc.collect()
 
 def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slider_violations, 
@@ -90,7 +90,8 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
                 debug_file.write(f"    Velocity Reduction: {file_data.get('velocity_improvement_percent', 0):.2f}%\n")
                 debug_file.write(f"    Acceleration Reduction: {file_data.get('acceleration_improvement_percent', 0):.2f}%\n")
                 debug_file.write(f"    Peak Torque (Slider 1): {file_data.get('peak_torque_slider1_Nm', 0):.2f} Nm\n")
-                debug_file.write(f"    Processing Time: {file_data.get('processing_time_seconds', 0):.1f}s\n")                if file_data.get('slider_limits_hit', False):
+                debug_file.write(f"    Processing Time: {file_data.get('processing_time_seconds', 0):.1f}s\n")                
+                if file_data.get('slider_limits_hit', False):
                     debug_file.write(f"    WARNING - Slider Violations: {file_data.get('violated_sliders', '')}\n")
                 debug_file.write("\n")
             
@@ -145,7 +146,7 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
 
 def process_file(args):
     """Process a single Excel file with pre-processed position and orientation data"""
-    file_path, leg_length, rail_max_travel, slider_min_travel_offset, enable_logging = args
+    file_path, leg_length, rail_max_travel, slider_base_position, enable_logging = args
     error_details = {}
     start_time = pd.Timestamp.now()
     df = None
@@ -183,9 +184,8 @@ def process_file(args):
         
         # Convert time from milliseconds to seconds
         trajectory_df['time'] = trajectory_df['time'] / 1000.0
-        
-        # Create controller and process
-        controller = PlatformController(leg_length, rail_max_travel, slider_min_travel_offset, log_file_path, log_attempts=enable_logging)
+          # Create controller and process
+        controller = PlatformController(leg_length, rail_max_travel, slider_base_position, log_file_path, log_attempts=enable_logging)
         
         # Process without optimization first
         results_df_no_opt = controller.process_trajectory(
@@ -235,8 +235,8 @@ def process_file(args):
         slider_limit_details = {}
         
         if 'Slider Position 1 (m)' in results_df.columns and 'Slider Position 2 (m)' in results_df.columns and 'Slider Position 3 (m)' in results_df.columns:
-            min_allowed = slider_min_travel_offset
-            max_allowed = slider_min_travel_offset + rail_max_travel
+            min_allowed = slider_base_position
+            max_allowed = slider_base_position + rail_max_travel
             
             for i, col in enumerate(['Slider Position 1 (m)', 'Slider Position 2 (m)', 'Slider Position 3 (m)'], 1):
                 slider_positions = results_df[col]
@@ -244,8 +244,8 @@ def process_file(args):
                 max_pos = slider_positions.max()
                 
                 # Check if any position hits the limits (with small tolerance)
-                hits_min = min_pos <= (min_allowed + 1e-6)
-                hits_max = max_pos >= (max_allowed - 1e-6)
+                hits_min = min_pos <= (min_allowed - 1e-6)
+                hits_max = max_pos >= (max_allowed + 1e-6)
                 
                 if hits_min or hits_max:
                     slider_limits_hit = True
@@ -373,16 +373,38 @@ def main():
     # Check for existing output files first
     if not check_existing_outputs(file_paths):
         return
+      # Get geometric parameters
+    print(f"\n{'='*60}")
+    print("PLATFORM CONFIGURATION")
+    print(f"{'='*60}")
     
-    # Get geometric parameters
     leg_length = float(input("\nEnter leg length in meters (default 0.3): ") or "0.3")
-    rail_max_travel = float(input("Enter maximum rail travel in meters (default 0.5): ") or "0.5")
-    slider_min_travel_offset = float(input("Enter slider minimum travel offset in meters (default 0.0): ") or "0.0")
+    rail_max_travel = float(input("Enter maximum rail travel distance in meters (default 0.5): ") or "0.5")
+    
+    # Improved slider position offset explanation
+    print(f"\n{'-'*50}")
+    print("SLIDER POSITION CONFIGURATION")
+    print(f"{'-'*50}")
+    print("The slider base position sets where the slider's 'zero' position is located")
+    print("in global coordinates. This defines the starting point of the slider's travel range.")
+    print("Examples:")
+    print("  • 0.0m: Sliders operate from 0.0m to rail_travel distance")
+    print("  • 0.1m: Sliders operate from 0.1m to (0.1m + rail_travel)")
+    print("  • -0.05m: Sliders operate from -0.05m to (-0.05m + rail_travel)")
+    
+    slider_base_position = float(input(f"\nEnter slider base position in meters (default 0.0): ") or "0.0")
+    
+    # Show the calculated operating range
+    slider_min_limit = slider_base_position
+    slider_max_limit = slider_base_position + rail_max_travel
+    print(f"\n✓ Sliders will operate in range: {slider_min_limit:.3f}m to {slider_max_limit:.3f}m")
     
     # Add logging option
-    enable_logging = input("\nEnable optimization logging? (y/N): ").lower().startswith('y')
-      # Create arguments for each file
-    process_args = [(f, leg_length, rail_max_travel, slider_min_travel_offset, enable_logging) for f in file_paths]
+    print(f"\n{'-'*50}")
+    print("LOGGING OPTIONS")
+    print(f"{'-'*50}")
+    enable_logging = input("Enable detailed optimization logging? (y/N): ").lower().startswith('y')    # Create arguments for each file
+    process_args = [(f, leg_length, rail_max_travel, slider_base_position, enable_logging) for f in file_paths]
     
     print(f"\nProcessing {len(file_paths)} files sequentially...")
     start_time = pd.Timestamp.now()
@@ -452,13 +474,13 @@ def main():
                     'peak_acceleration_opt_ms2': np.nan,
                     'peak_torque_slider1_Nm': np.nan,
                     'slider_limits_hit': False,
-                    'violated_sliders': '',
-                    'processing_time_seconds': metrics['processing_time'] if 'processing_time' in metrics else np.nan
+                    'violated_sliders': '',                    'processing_time_seconds': metrics['processing_time'] if 'processing_time' in metrics else np.nan
                 })
                 print(f"\nError processing {file_name}:")
                 for error_type, error_msg in error_details.items():
                     print(f"  {error_type}: {error_msg}")
-              # Show estimated time remaining
+            
+            # Show estimated time remaining
             elapsed_time = (pd.Timestamp.now() - start_time).total_seconds()
             files_remaining = len(file_paths) - (i + 1)
             if i > 0:  # Only show estimate after first file
@@ -473,6 +495,12 @@ def main():
     finally:
         # Calculate total processing time
         total_time = (pd.Timestamp.now() - start_time).total_seconds()
+        
+        # Initialize statistics variables
+        vel_stats = None
+        acc_stats = None
+        output_dir = os.path.join(dir_path, "platform_outputs")
+        os.makedirs(output_dir, exist_ok=True)
         
         # Calculate and display improvement statistics
         if velocity_improvements and acceleration_improvements:
@@ -512,8 +540,7 @@ def main():
             print(f"  Min:      {acc_stats['min']:.2f}%")
             print(f"  Max:      {acc_stats['max']:.2f}%")
             
-            # Slider limit violation statistics
-            print(f"\n{'='*60}")
+            # Slider limit violation statistics            print(f"\n{'='*60}")
             print("SLIDER LIMIT VIOLATION ANALYSIS")
             print(f"{'='*60}")
             
@@ -531,6 +558,18 @@ def main():
                         print(f"    {slider}: {details}")
             else:
                 print("✓ No files hit slider limits!")
+            
+            # Create comprehensive debug files (moved here where variables are in scope)
+            try:
+                create_debug_success = create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slider_violations, 
+                               output_dir, total_time, successful, failed)
+                
+                if create_debug_success:
+                    print(f"\nComprehensive debug files created in: {output_dir}")
+                else:
+                    print(f"\nFailed to create debug files")
+            except Exception as e:
+                print(f"\nError during debug file creation: {e}")
         
         # Create summary DataFrame and save to Excel
         if summary_data: # Added
@@ -603,22 +642,9 @@ def main():
                 print(f"\n{os.path.basename(file_path)}:")
                 for error_type, error_msg in error_details.items():
                     print(f"  {error_type}: {error_msg}")
-            
-            # Point to the error log
+              # Point to the error log
             output_dir = os.path.join(os.path.dirname(file_paths[0]), "platform_outputs")
             print(f"\nDetailed error logs have been written to: {os.path.join(output_dir, 'processing_errors.log')}")
-        
-        # Create debug files with analysis
-        try:
-            create_debug_success = create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slider_violations, 
-                           output_dir, total_time, successful, failed)
-            
-            if create_debug_success:
-                print(f"\nComprehensive debug files created in: {output_dir}")
-            else:
-                print(f"\nFailed to create debug files")
-        except Exception as e:
-            print(f"\nError during debug file creation: {e}")
 
 if __name__ == '__main__':
     main()

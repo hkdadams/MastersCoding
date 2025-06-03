@@ -1,0 +1,4 @@
+file_name,status,velocity_improvement_percent,acceleration_improvement_percent,peak_velocity_no_opt_ms,peak_acceleration_no_opt_ms2,peak_velocity_opt_ms,peak_acceleration_opt_ms2,peak_torque_slider1_Nm,slider_limits_hit,violated_sliders,processing_time_seconds
+test_file_1.xlsx,Success,25.3,18.7,0.524,2.34,0.391,1.9,12.5,False,,45.2
+test_file_2.xlsx,Success,31.1,22.8,0.487,2.15,0.335,1.66,15.8,True,"Slider 1, Slider 3",52.7
+test_file_3.xlsx,Failed,,,,,,,,False,,12.3

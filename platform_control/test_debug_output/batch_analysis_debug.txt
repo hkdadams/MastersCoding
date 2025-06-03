@@ -5,22 +5,22 @@ Processing Summary:
 Total Files Processed: 3
 Successfully Processed: 2
 Failed: 1
-Total Processing Time: 3.0 minutes
-Average Time per File: 60.2 seconds
+Total Processing Time: 1.8 minutes
+Average Time per File: 36.7 seconds
 
 Velocity Reduction Analysis:
-Mean Reduction: 12.10%
-Median Reduction: 12.10%
-Standard Deviation: 4.50%
-Minimum Reduction: 8.90%
-Maximum Reduction: 15.30%
+Mean Reduction: 28.20%
+Median Reduction: 28.20%
+Standard Deviation: 2.90%
+Minimum Reduction: 25.30%
+Maximum Reduction: 31.10%
 
 Acceleration Reduction Analysis:
-Mean Reduction: 20.40%
-Median Reduction: 20.40%
-Standard Deviation: 3.30%
-Minimum Reduction: 18.10%
-Maximum Reduction: 22.70%
+Mean Reduction: 20.75%
+Median Reduction: 20.75%
+Standard Deviation: 2.05%
+Minimum Reduction: 18.70%
+Maximum Reduction: 22.80%
 
 Slider Limit Violation Analysis:
 Files with Slider Violations: 1
@@ -28,10 +28,10 @@ Total Successful Files: 2
 Violation Percentage: 50.0%
 
 Detailed Violation List:
-File: Rugby_test_2.xlsx
+File: test_file_2.xlsx
 Violated Sliders: Slider 1, Slider 3
-  Slider 1: min(0.0001m)
-  Slider 3: max(0.4999m)
+  Slider 1: max(0.5023m)
+  Slider 3: min(-0.0015m)
 
 ==================================================
 PER-FILE ANALYSIS SUMMARY
@@ -39,14 +39,39 @@ PER-FILE ANALYSIS SUMMARY
 
 Successful Files (Ranked by Velocity Improvement):
 --------------------------------------------------
- 1. Rugby_test_1.xlsx
-    Velocity Reduction: 15.30%
-    Acceleration Reduction: 22.70%
+ 1. test_file_2.xlsx
+    Velocity Reduction: 31.10%
+    Acceleration Reduction: 22.80%
+    Peak Torque (Slider 1): 15.80 Nm
+    Processing Time: 52.7s
+    WARNING - Slider Violations: Slider 1, Slider 3
+
+ 2. test_file_1.xlsx
+    Velocity Reduction: 25.30%
+    Acceleration Reduction: 18.70%
     Peak Torque (Slider 1): 12.50 Nm
     Processing Time: 45.2s
 
- 2. Rugby_test_2.xlsx
-    Velocity Reduction: 8.90%
-    Acceleration Reduction: 18.10%
-    Peak Torque (Slider 1): 15.80 Nm
-    Processing Time: 52.1s
+Failed Files:
+--------------------------------------------------
+• test_file_3.xlsx
+  Processing Time: 12.3s
+
+==================================================
+PERFORMANCE ANALYSIS
+==================================================
+
+Processing Time Statistics:
+Mean Processing Time: 49.0 seconds
+Median Processing Time: 49.0 seconds
+Fastest File: 45.2 seconds
+Slowest File: 52.7 seconds
+
+Peak Torque Statistics (Slider 1):
+Mean Peak Torque: 14.15 Nm
+Median Peak Torque: 14.15 Nm
+Maximum Peak Torque: 15.80 Nm
+Minimum Peak Torque: 12.50 Nm
+
+==================================================
+Analysis completed at: 2025-06-02 22:39:53

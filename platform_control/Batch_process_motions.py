@@ -14,7 +14,7 @@ def cleanup_memory():
     gc.collect()
 
 def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slider_violations, 
-                           output_dir, total_time, successful, failed):
+                           files_with_angle_violations, output_dir, total_time, successful, failed):
     """Create comprehensive debug files with batch analysis data"""
     try:
         # Create main debug file
@@ -71,6 +71,33 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
                     debug_file.write("\n")
             else:
                 debug_file.write("No slider limit violations detected!\n\n")
+            
+            # Angle Constraint Violation Analysis
+            debug_file.write("Angle Constraint Violation Analysis:\n")
+            num_angle_violations = len(files_with_angle_violations)
+            angle_violation_percentage = (num_angle_violations / total_successful) * 100 if total_successful > 0 else 0
+            
+            debug_file.write(f"Files with Angle Violations: {num_angle_violations}\n")
+            debug_file.write(f"Total Successful Files: {total_successful}\n")
+            debug_file.write(f"Violation Percentage: {angle_violation_percentage:.1f}%\n\n")
+            
+            if files_with_angle_violations:
+                debug_file.write("Detailed Angle Violation List:\n")
+                for violation in files_with_angle_violations:
+                    debug_file.write(f"File: {violation['file_name']}\n")
+                    debug_file.write(f"Violated Angles: {', '.join(violation['violated_angles'])}\n")
+                    for leg, details in violation['details'].items():
+                        debug_file.write(f"  {leg}: {details}\n")
+                    
+                    # Add detailed violation summary
+                    max_violations = violation['max_violations']
+                    total_violations = violation['total_violations']
+                    for leg_num in [2, 3]:
+                        if total_violations[leg_num] > 0:
+                            debug_file.write(f"  Leg {leg_num} Summary: {max_violations[leg_num]:.1f}° max violation, {total_violations[leg_num]} total violations\n")
+                    debug_file.write("\n")
+            else:
+                debug_file.write("No angle constraint violations detected!\n\n")
             
             # Per-File Analysis Summary
             debug_file.write("=" * 50 + "\n")
@@ -135,7 +162,7 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
 
 def process_file(args):
     """Process a single Excel file with pre-processed position and orientation data"""
-    file_path, leg_length, rail_max_travel, slider_base_position, platform_side, platform_radius, enable_logging = args
+    file_path, leg_length, rail_max_travel, slider_base_position, platform_side, platform_radius, enable_logging, max_leg_platform_angle, max_iterations, convergence_tolerance = args
     error_details = {}
     start_time = pd.Timestamp.now()
     df = None
@@ -172,9 +199,8 @@ def process_file(args):
         trajectory_df = df.rename(columns=column_map)
           # Convert time from milliseconds to seconds
         trajectory_df['time'] = trajectory_df['time'] / 1000.0
-        
-        # Create controller and process
-        controller = PlatformController(leg_length, rail_max_travel, slider_base_position, log_file_path, platform_side=platform_side, platform_radius=platform_radius, log_attempts=enable_logging)
+          # Create controller and process
+        controller = PlatformController(leg_length, rail_max_travel, slider_base_position, log_file_path, platform_side=platform_side, platform_radius=platform_radius, max_leg_platform_angle=max_leg_platform_angle, log_attempts=enable_logging, max_iterations=max_iterations, convergence_tolerance=convergence_tolerance)
         
         # Process without optimization first
         results_df_no_opt = controller.process_trajectory(
@@ -244,6 +270,72 @@ def process_file(args):
                         limit_type.append(f"max({max_pos:.4f}m)")
                     slider_limit_details[f"Slider {i}"] = ", ".join(limit_type)
         
+        # Check for angle constraint violations
+        angle_constraints_hit = False
+        violated_angles = []
+        angle_constraint_details = {}
+        
+        # Check angle constraints for each trajectory point
+        max_angle_violations = {2: 0.0, 3: 0.0}  # Track max violations for legs 2 and 3
+        total_angle_violations = {2: 0, 3: 0}    # Count total violations for legs 2 and 3
+        
+        for idx, row in trajectory_df.iterrows():
+            try:
+                # Get position and rotation from trajectory
+                position = np.array([row['x'], row['y'], row['z']])
+                angles = np.array([row['roll'], row['pitch'], row['yaw']])
+                
+                # Create rotation matrix and calculate platform points
+                roll, pitch, yaw = np.radians(angles)
+                Rx = np.array([[1, 0, 0],
+                            [0, np.cos(roll), -np.sin(roll)],
+                            [0, np.sin(roll), np.cos(roll)]])
+                Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                            [0, 1, 0],
+                            [-np.sin(pitch), 0, np.cos(pitch)]])
+                Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                            [np.sin(yaw), np.cos(yaw), 0],
+                            [0, 0, 1]])
+                rotation = Rz @ Ry @ Rx
+                
+                platform_points = controller.transform_platform_points(position, rotation)
+                
+                # Get slider positions for this trajectory point
+                if idx < len(results_df):
+                    slider_positions = np.array([
+                        results_df.iloc[idx]['Slider Position 1 (m)'],
+                        results_df.iloc[idx]['Slider Position 2 (m)'],
+                        results_df.iloc[idx]['Slider Position 3 (m)']
+                    ])
+                    
+                    # Check legs 2 and 3 (indices 1 and 2) for angle constraints
+                    for i in range(1, 3):
+                        # Calculate slider position in world coordinates
+                        slider_pos = controller.rail_vectors[i] * slider_positions[i]
+                        
+                        # Calculate leg vector (from slider to platform attachment point)
+                        leg_vector = platform_points[i] - slider_pos
+                        
+                        # Calculate angle between platform center-to-leg vector and leg vector
+                        angle = controller.calculate_leg_platform_angle(position, platform_points[i], leg_vector)
+                        
+                        # Check if angle constraint is violated
+                        if angle > max_leg_platform_angle:
+                            angle_violation = angle - max_leg_platform_angle
+                            max_angle_violations[i+1] = max(max_angle_violations[i+1], angle_violation)
+                            total_angle_violations[i+1] += 1
+                            
+            except Exception:
+                # Skip this trajectory point if there's an error
+                continue
+        
+        # Determine if any angle constraints were violated
+        for leg_num in [2, 3]:
+            if total_angle_violations[leg_num] > 0:
+                angle_constraints_hit = True
+                violated_angles.append(f"Leg {leg_num}")
+                angle_constraint_details[f"Leg {leg_num}"] = f"max_violation({max_angle_violations[leg_num]:.1f}°), count({total_angle_violations[leg_num]})"
+        
         processing_time = (pd.Timestamp.now() - start_time).total_seconds()
         print(f"Processing complete in {processing_time:.1f} seconds")
         print(f"Velocity reduction: {vel_improvement:.1f}%")
@@ -256,7 +348,13 @@ def process_file(args):
         else:
             print("✓ No slider limit violations detected")
         
-        # Return comprehensive results
+        if angle_constraints_hit:
+            print(f"⚠ ANGLE CONSTRAINT VIOLATIONS: {', '.join(violated_angles)}")
+            for leg, details in angle_constraint_details.items():
+                print(f"  {leg}: {details}")
+        else:
+            print("✓ No angle constraint violations detected")
+          # Return comprehensive results
         return True, file_path, None, {
             'vel_improvement': vel_improvement,
             'acc_improvement': acc_improvement,
@@ -266,7 +364,13 @@ def process_file(args):
             'peak_accelerations_opt': peak_accelerations,
             'slider_limits_hit': slider_limits_hit,
             'violated_sliders': violated_sliders,
-            'slider_limit_details': slider_limit_details,            'processing_time': processing_time
+            'slider_limit_details': slider_limit_details,
+            'angle_constraints_hit': angle_constraints_hit,
+            'violated_angles': violated_angles,
+            'angle_constraint_details': angle_constraint_details,
+            'max_angle_violations': max_angle_violations,
+            'total_angle_violations': total_angle_violations,
+            'processing_time': processing_time
         }
         
     except Exception as e:
@@ -416,15 +520,68 @@ def main():
     # Show the calculated operating range
     slider_min_limit = slider_base_position
     slider_max_limit = slider_base_position + rail_max_travel
-    print(f"\n✓ Sliders will operate in range: {slider_min_limit:.3f}m to {slider_max_limit:.3f}m")
-      # Add logging option
+    print(f"\n✓ Sliders will operate in range: {slider_min_limit:.3f}m to {slider_max_limit:.3f}m")    # Add logging option
     print(f"\n{'-'*50}")
     print("LOGGING OPTIONS")
     print(f"{'-'*50}")
     enable_logging = input("Enable detailed optimization logging? (y/N): ").lower().startswith('y')
     
-    # Create arguments for each file
-    process_args = [(f, leg_length, rail_max_travel, slider_base_position, platform_side, platform_radius, enable_logging) for f in file_paths]
+    # Add angle constraint configuration
+    print(f"\n{'-'*50}")
+    print("ANGLE CONSTRAINT CONFIGURATION")
+    print(f"{'-'*50}")
+    print("The angle constraint limits the maximum angle between the platform center-to-leg")
+    print("vector and the actual leg vector for legs 2 and 3. This prevents extreme leg")
+    print("positions that could damage joints.")
+    print("Examples:")
+    print("  • 130°: Default constraint (recommended)")
+    print("  • 120°: More restrictive (safer for fragile joints)")
+    print("  • 140°: More permissive (allows wider motion range)")
+    print("  • 180°: No constraint (maximum freedom, use with caution)")
+    
+    max_leg_platform_angle = float(input(f"\nEnter maximum leg-platform angle in degrees (default 130.0): ") or "130.0")
+    
+    print(f"\n✓ Angle constraint set to: {max_leg_platform_angle:.1f}°")
+    if max_leg_platform_angle >= 180.0:
+        print("⚠ WARNING: No angle constraint applied - use with caution!")
+    elif max_leg_platform_angle < 90.0:
+        print(f"⚠ WARNING: Very restrictive constraint ({max_leg_platform_angle:.1f}°) - may limit motion significantly!")
+    
+    # Add optimization convergence configuration
+    print(f"\n{'-'*50}")
+    print("OPTIMIZATION CONVERGENCE CONFIGURATION")
+    print(f"{'-'*50}")
+    print("Control how long the optimizer spends trying to find the best solution:")
+    print("• Max iterations: Higher = more thorough but slower (default: 1000)")
+    print("• Convergence tolerance: Lower = more precise but slower (default: 1e-6)")
+    print("\nPresets:")
+    print("  [1] Fast (500 iterations, 1e-4 tolerance) - Quick results, may not fully converge")
+    print("  [2] Standard (1000 iterations, 1e-6 tolerance) - Good balance (default)")
+    print("  [3] Thorough (2000 iterations, 1e-8 tolerance) - Best results, slower")
+    print("  [4] Custom - Specify your own values")
+    
+    convergence_choice = input("\nEnter choice (1-4, default 2): ").strip() or "2"
+    
+    if convergence_choice == "1":
+        max_iterations = 500
+        convergence_tolerance = 1e-4
+        print("✓ Fast convergence settings applied")
+    elif convergence_choice == "3":
+        max_iterations = 2000
+        convergence_tolerance = 1e-8
+        print("✓ Thorough convergence settings applied")
+    elif convergence_choice == "4":
+        print("\nCustom convergence settings:")
+        max_iterations = int(input("Enter maximum iterations (default 1000): ") or "1000")
+        convergence_tolerance = float(input("Enter convergence tolerance (default 1e-6): ") or "1e-6")
+        print(f"✓ Custom settings: {max_iterations} iterations, {convergence_tolerance} tolerance")
+    else:
+        max_iterations = 1000
+        convergence_tolerance = 1e-6
+        print("✓ Standard convergence settings applied")
+    
+    print(f"Final convergence settings: {max_iterations} max iterations, {convergence_tolerance:.0e} tolerance")    # Create arguments for each file
+    process_args = [(f, leg_length, rail_max_travel, slider_base_position, platform_side, platform_radius, enable_logging, max_leg_platform_angle, max_iterations, convergence_tolerance) for f in file_paths]
     
     print(f"\nProcessing {len(file_paths)} files sequentially...")
     start_time = pd.Timestamp.now()
@@ -434,11 +591,11 @@ def main():
     failed = 0
     failed_files = []
     summary_data = [] # Added
-    
-    # Track metrics for statistics
+      # Track metrics for statistics
     velocity_improvements = []
     acceleration_improvements = []
     files_with_slider_violations = []
+    files_with_angle_violations = []
     
     try:
         # Create a progress bar for sequential processing
@@ -448,12 +605,13 @@ def main():
             
             if success:
                 successful += 1
-                
-                # Extract metrics
+                  # Extract metrics
                 vel_improvement = metrics['vel_improvement']
                 acc_improvement = metrics['acc_improvement']
                 slider_limits_hit = metrics['slider_limits_hit']
                 violated_sliders = metrics['violated_sliders']
+                angle_constraints_hit = metrics['angle_constraints_hit']
+                violated_angles = metrics['violated_angles']
                 
                 # Store for statistics
                 velocity_improvements.append(vel_improvement)
@@ -463,7 +621,16 @@ def main():
                     files_with_slider_violations.append({
                         'file_name': file_name,
                         'violated_sliders': violated_sliders,
-                        'details': metrics['slider_limit_details']                    })
+                        'details': metrics['slider_limit_details']
+                    })
+                
+                if angle_constraints_hit:
+                    files_with_angle_violations.append({
+                        'file_name': file_name,
+                        'violated_angles': violated_angles,
+                        'details': metrics['angle_constraint_details'],
+                        'max_violations': metrics['max_angle_violations'],
+                        'total_violations': metrics['total_angle_violations']                    })
                 
                 summary_data.append({
                     'file_name': file_name,
@@ -476,7 +643,10 @@ def main():
                     'peak_acceleration_opt_ms2': metrics['peak_accelerations_opt'],
                     'slider_limits_hit': slider_limits_hit,
                     'violated_sliders': ', '.join(violated_sliders) if violated_sliders else '',
-                    'processing_time_seconds': metrics['processing_time']                })
+                    'angle_constraints_hit': angle_constraints_hit,
+                    'violated_angles': ', '.join(violated_angles) if violated_angles else '',
+                    'processing_time_seconds': metrics['processing_time']
+                })
             else:
                 failed += 1
                 failed_files.append((file_path, error_details))
@@ -519,18 +689,18 @@ def main():
         acc_stats = None
         output_dir = os.path.join(dir_path, "platform_outputs")
         os.makedirs(output_dir, exist_ok=True)
-          # Calculate and display improvement statistics
+        # Calculate and display improvement statistics
         if velocity_improvements and acceleration_improvements:
             print(f"\n{'='*60}")
             print("IMPROVEMENT STATISTICS")
             print(f"{'='*60}")
-              # Filter out negative percentage reductions (only include feasible improvements)
+            # Filter out negative percentage reductions (only include feasible improvements)
             feasible_velocity_improvements = [v for v in velocity_improvements if v > 0]
             feasible_acceleration_improvements = [a for a in acceleration_improvements if a > 0]
             
             print(f"\nFiltered {len(velocity_improvements) - len(feasible_velocity_improvements)} infeasible velocity improvements")
             print(f"Filtered {len(acceleration_improvements) - len(feasible_acceleration_improvements)} infeasible acceleration improvements")
-              # Velocity improvement statistics (feasible improvements only)
+            # Velocity improvement statistics (feasible improvements only)
             if feasible_velocity_improvements:
                 vel_stats = {
                     'mean': np.mean(feasible_velocity_improvements),
@@ -550,7 +720,7 @@ def main():
             else:
                 vel_stats = None
                 print(f"\nVelocity Reduction Statistics: No feasible improvements found")
-              # Acceleration improvement statistics (feasible improvements only)
+            # Acceleration improvement statistics (feasible improvements only)
             if feasible_acceleration_improvements:
                 acc_stats = {
                     'mean': np.mean(feasible_acceleration_improvements),
@@ -570,11 +740,10 @@ def main():
             else:
                 acc_stats = None
                 print(f"\nAcceleration Reduction Statistics: No feasible improvements found")
-              # Slider limit violation statistics
+            # Slider limit violation statistics
             print(f"\n{'='*60}")
             print("SLIDER LIMIT VIOLATION ANALYSIS")
             print(f"{'='*60}")
-            
             total_successful = len(velocity_improvements)
             num_violations = len(files_with_slider_violations)
             violation_percentage = (num_violations / total_successful) * 100 if total_successful > 0 else 0
@@ -590,9 +759,35 @@ def main():
             else:
                 print("✓ No files hit slider limits!")
             
+            # Angle constraint violation statistics
+            print(f"\n{'='*60}")
+            print("ANGLE CONSTRAINT VIOLATION ANALYSIS")
+            print(f"{'='*60}")
+            
+            num_angle_violations = len(files_with_angle_violations)
+            angle_violation_percentage = (num_angle_violations / total_successful) * 100 if total_successful > 0 else 0
+            
+            print(f"\nFiles hitting angle constraints: {num_angle_violations} out of {total_successful} successful files ({angle_violation_percentage:.1f}%)")
+            
+            if files_with_angle_violations:
+                print(f"\nFiles with angle constraint violations:")
+                for violation in files_with_angle_violations:
+                    print(f"  - {violation['file_name']}: {', '.join(violation['violated_angles'])}")
+                    for leg, details in violation['details'].items():
+                        print(f"    {leg}: {details}")
+                    
+                    # Show maximum violations per leg
+                    max_violations = violation['max_violations']
+                    total_violations = violation['total_violations']
+                    for leg_num in [2, 3]:
+                        if total_violations[leg_num] > 0:
+                            print(f"    Leg {leg_num} summary: {max_violations[leg_num]:.1f}° max violation, {total_violations[leg_num]} total violations")
+            else:
+                print("✓ No files hit angle constraints!")
+            
             # Create comprehensive debug files (moved here where variables are in scope)
             try:
-                create_debug_success = create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slider_violations, 
+                create_debug_success = create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slider_violations, files_with_angle_violations,
                                output_dir, total_time, successful, failed)
                 
                 if create_debug_success:
@@ -613,10 +808,10 @@ def main():
                 with pd.ExcelWriter(summary_excel_path, engine='openpyxl') as writer:
                     # Main summary sheet
                     summary_df.to_excel(writer, index=False, sheet_name="File_Results")
-                      # Statistics summary sheet
+                    # Statistics summary sheet
                     if velocity_improvements and acceleration_improvements:
                         stats_data = []
-                          # Velocity stats (only if feasible improvements exist)
+                        # Velocity stats (only if feasible improvements exist)
                         if vel_stats is not None:
                             vel_stats_row = {
                                 'Metric': 'Velocity Reduction (% - Feasible Only)',
@@ -677,11 +872,24 @@ def main():
                             for violation in files_with_slider_violations:
                                 violation_data.append({
                                     'File_Name': violation['file_name'],
-                                    'Violated_Sliders': ', '.join(violation['violated_sliders']),
-                                    'Details': '; '.join([f"{k}: {v}" for k, v in violation['details'].items()])
+                                    'Violated_Sliders': ', '.join(violation['violated_sliders']),                                    'Details': '; '.join([f"{k}: {v}" for k, v in violation['details'].items()])
                                 })
                             violation_df = pd.DataFrame(violation_data)
                             violation_df.to_excel(writer, index=False, sheet_name="Slider_Violations")
+                        
+                        # Angle constraint violations sheet
+                        if files_with_angle_violations:
+                            angle_violation_data = []
+                            for violation in files_with_angle_violations:
+                                angle_violation_data.append({
+                                    'File_Name': violation['file_name'],
+                                    'Violated_Angles': ', '.join(violation['violated_angles']),
+                                    'Details': '; '.join([f"{k}: {v}" for k, v in violation['details'].items()]),
+                                    'Max_Violations': '; '.join([f"Leg {k}: {v:.1f}°" for k, v in violation['max_violations'].items() if v > 0]),
+                                    'Total_Violations': '; '.join([f"Leg {k}: {v}" for k, v in violation['total_violations'].items() if v > 0])
+                                })
+                            angle_violation_df = pd.DataFrame(angle_violation_data)
+                            angle_violation_df.to_excel(writer, index=False, sheet_name="Angle_Violations")
                     
                 print(f"\nBatch processing summary saved to: {summary_excel_path}")
             except Exception as e:
@@ -689,7 +897,8 @@ def main():
         
         # Create comprehensive debug files (moved to end of summary section)
 
-        # Print summary        print(f"\n{'='*60}")
+        # Print summary
+        print(f"\n{'='*60}")
         print("BATCH PROCESSING SUMMARY")
         print(f"{'='*60}")
         print(f"Total processing time: {total_time/60:.1f} minutes")

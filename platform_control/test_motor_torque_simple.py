@@ -29,7 +29,7 @@ def test_motor_torque():
         print(f"  Leg length: {leg_length}m")
         print(f"  Rail max travel: {rail_max_travel}m")
         
-        controller = PlatformController(leg_length, rail_max_travel, 0.0, log_file)
+        controller = PlatformController(leg_length, rail_max_travel, log_file)
         print("✓ Controller created successfully")
         
         # Test motor torque calculation with a simple pose

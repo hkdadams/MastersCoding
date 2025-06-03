@@ -23,7 +23,7 @@ try:
     
     # Create controller
     log_print("Creating controller...")
-    controller = PlatformController(0.5, 0.5, 0.0, "test_motor_torque.log")
+    controller = PlatformController(0.5, 0.5, "test_motor_torque.log")
     log_print("OK Controller created")
     
     # Test motor torque calculation

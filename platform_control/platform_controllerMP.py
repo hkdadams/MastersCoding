@@ -187,7 +187,11 @@ def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]
             args=(trajectory_df, dt),
             method='SLSQP',
             bounds=bounds,
-            options={'maxiter': 100, 'ftol': 1e-6}
+            options={
+                'maxiter': controller.max_iterations,
+                'ftol': controller.convergence_tolerance,
+                'gtol': controller.convergence_tolerance
+            }
         )
         
         # Check if this solution is feasible by looking at controller's best_feasible_solution
@@ -207,11 +211,10 @@ def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]
             'error': str(e),
             'x': x0,
             'fun': float('inf'),
-            'is_feasible': False,        'feasible_score': None
-        }
+            'is_feasible': False,        'feasible_score': None        }
 
 class PlatformController:
-    def __init__(self, leg_length: float, rail_max_travel: float, slider_min_travel_offset: float, log_file_path: str, platform_side: float = None, platform_radius: float = None, log_attempts: bool = True):
+    def __init__(self, leg_length: float, rail_max_travel: float, slider_min_travel_offset: float, log_file_path: str, platform_side: float = None, platform_radius: float = None, max_leg_platform_angle: float = 130.0, log_attempts: bool = True, max_iterations: int = 1000, convergence_tolerance: float = 1e-6):
         """
         Initialize the platform controller with geometric parameters
         
@@ -222,9 +225,11 @@ class PlatformController:
             log_file_path: Path to the debug log file
             platform_side: Side length of the triangular platform in meters (optional)
             platform_radius: Radius of the triangular platform in meters (optional)
+            max_leg_platform_angle: Maximum angle between leg and platform center-to-leg vector in degrees (default: 130.0)
             log_attempts: Whether to log individual optimization attempts (default: True)
-            
-        Note:
+            max_iterations: Maximum number of optimization iterations (default: 1000)
+            convergence_tolerance: Convergence tolerance for optimization (default: 1e-6)
+              Note:
             You must specify exactly one of platform_side OR platform_radius.
             If neither is specified, defaults to platform_side = 0.2m
         """
@@ -232,7 +237,14 @@ class PlatformController:
         self.rail_max_travel = rail_max_travel  # This is the effective travel length
         self.slider_min_travel_offset = slider_min_travel_offset # This is the absolute start coordinate of the travel
         self.L_squared = leg_length**2
-        self.log_attempts = log_attempts        # Add offset parameters
+        self.log_attempts = log_attempts
+        self.max_leg_platform_angle = max_leg_platform_angle  # Maximum angle constraint for legs 2 and 3
+        
+        # Convergence control parameters
+        self.max_iterations = max_iterations
+        self.convergence_tolerance = convergence_tolerance
+        
+        # Add offset parameters
         self.position_offset = np.zeros(3)  # [x, y, z] offsets
         self.rotation_offset = np.zeros(3)  # [roll, pitch, yaw] offsets in degrees
           # Platform geometry (configurable) - accept either side length or radius
@@ -503,8 +515,7 @@ class PlatformController:
                     print(f"    s_pos = {s_pos:.3f}m")
                     print(f"    s_neg = {s_neg:.3f}m")
                 raise ValueError(f"Slider {i+1} position out of range")
-            
-            # Calculate actual leg length for verification
+              # Calculate actual leg length for verification
             slider_pos = ui * slider_positions[i]
             leg_vector = Pi - slider_pos
             actual_length = np.linalg.norm(leg_vector)
@@ -514,6 +525,23 @@ class PlatformController:
                 print(f"    Leg vector: ({leg_vector[0]:.3f}, {leg_vector[1]:.3f}, {leg_vector[2]:.3f})m")
                 print(f"    Actual leg length: {actual_length:.3f}m (should be {self.leg_length:.3f}m)")
                 print(f"    Length error: {(actual_length - self.leg_length)*1000:.2f}mm")
+            
+            # Check angle constraint for legs 2 and 3
+            if i >= 1:  # Only legs 2 and 3 (indices 1 and 2)
+                platform_center = platform_pos if platform_pos is not None else np.array([0.0, 0.0, 0.0])
+                angle = self.calculate_leg_platform_angle(platform_center, Pi, leg_vector)
+                
+                if debug:
+                    print(f"  Angle constraint check:")
+                    print(f"    Platform center-to-leg vs leg angle: {angle:.1f}° (max: {self.max_leg_platform_angle:.1f}°)")
+                
+                if angle > self.max_leg_platform_angle:
+                    if debug:
+                        print(f"    ⚠ WARNING: Angle constraint violated for leg {i+1}!")
+                        print(f"    This configuration may damage joints - consider adjusting platform position/orientation")
+                else:
+                    if debug:
+                        print(f"    ✓ Angle constraint satisfied for leg {i+1}")
         
         # Apply physical slider travel limits based on the new offset
         min_abs_pos = self.slider_min_travel_offset
@@ -612,9 +640,13 @@ class PlatformController:
         # Initial guess: use target position and rotation
         initial_euler = Rotation.from_matrix(target_rotation).as_euler('xyz')
         initial_guess = np.concatenate([target_position, initial_euler])
-        
-        # Optimize
-        result = minimize(objective, initial_guess, method='SLSQP')
+          # Optimize
+        result = minimize(objective, initial_guess, method='SLSQP', 
+                         options={
+                             'maxiter': self.max_iterations,
+                             'ftol': self.convergence_tolerance,
+                             'gtol': self.convergence_tolerance
+                         })
         
         if not result.success:
             raise ValueError("Failed to optimize platform orientation")
@@ -834,6 +866,24 @@ class PlatformController:
                             out_of_bounds_count += 1
                             max_out_of_bounds = max(max_out_of_bounds, pos - self.rail_max_travel)
                     
+                    # Check angle constraints for legs 2 and 3 and calculate penalties
+                    for i in range(1, 3):  # Check legs 2 and 3 (indices 1 and 2)
+                        # Calculate slider position in world coordinates
+                        slider_pos = self.rail_vectors[i] * slider_positions[i]
+                        
+                        # Calculate leg vector (from slider to platform attachment point)
+                        leg_vector = platform_points[i] - slider_pos
+                        
+                        # Calculate angle between platform center-to-leg vector and leg vector
+                        angle = self.calculate_leg_platform_angle(position, platform_points[i], leg_vector)
+                        
+                        # Apply penalty if angle constraint is violated
+                        if angle > self.max_leg_platform_angle:
+                            angle_violation = angle - self.max_leg_platform_angle
+                            out_of_bounds_count += 1
+                            # Use quadratic penalty that increases with violation severity
+                            max_out_of_bounds = max(max_out_of_bounds, angle_violation * 2.0)  # Scale angle violations
+                    
                     # Add movement cost (only if point is reachable)
                     total_error += np.sum(np.abs(slider_positions)) * 0.01
                     
@@ -859,8 +909,8 @@ class PlatformController:
             velocity_penalty = peak_velocity * 10.0 if peak_velocity > 2.0 else 0.0  # Penalize velocities above 2 m/s
             
             # Add harsh penalty for exceeding maximum acceleration of 50 m/s²
-            if peak_acceleration > 50.0:
-                acceleration_penalty = (peak_acceleration - 50.0) * 100.0  # Much higher penalty factor for exceeding max
+            if peak_acceleration > 150.0:
+                acceleration_penalty = (peak_acceleration - 150.0) * 100.0  # Much higher penalty factor for exceeding max
             else:
                 acceleration_penalty = peak_acceleration * 5.0 if peak_acceleration > 10.0 else 0.0  # Original acceleration penalty
             
@@ -1448,6 +1498,77 @@ class PlatformController:
             platform_points, slider_positions, leg_forces
         )
 
+    def calculate_leg_platform_angle(self, platform_center: np.ndarray, platform_point: np.ndarray, leg_vector: np.ndarray) -> float:
+        """
+        Calculate the angle between the platform center-to-leg vector and the leg vector itself
+        
+        Args:
+            platform_center: Platform center position [x, y, z]
+            platform_point: Platform attachment point [x, y, z] 
+            leg_vector: Vector from slider to platform attachment point [x, y, z]
+            
+        Returns:
+            Angle in degrees between platform center-to-leg vector and leg vector
+        """
+        # Vector from platform center to attachment point
+        center_to_leg = platform_point - platform_center
+        
+        # Normalize both vectors
+        center_to_leg_unit = center_to_leg / np.linalg.norm(center_to_leg)
+        leg_unit = leg_vector / np.linalg.norm(leg_vector)
+        
+        # Calculate angle using dot product
+        cos_angle = np.clip(np.dot(center_to_leg_unit, leg_unit), -1.0, 1.0)
+        angle_rad = np.arccos(cos_angle)
+        angle_deg = np.degrees(angle_rad)
+        
+        return angle_deg
+
+    def check_angle_constraints(self, platform_center: np.ndarray, platform_points: List[np.ndarray], 
+                               slider_positions: np.ndarray, debug: bool = True) -> bool:
+        """
+        Check if legs 2 and 3 satisfy the angle constraints
+        
+        Args:
+            platform_center: Platform center position [x, y, z]
+            platform_points: List of platform attachment points
+            slider_positions: Array of slider positions
+            debug: Whether to print debug information
+            
+        Returns:
+            True if constraints are satisfied, False otherwise
+        """
+        constraints_satisfied = True
+        
+        # Check legs 2 and 3 (indices 1 and 2)
+        for i in range(1, 3):
+            # Calculate slider position in world coordinates
+            slider_pos = self.rail_vectors[i] * slider_positions[i]
+            
+            # Calculate leg vector (from slider to platform attachment point)
+            leg_vector = platform_points[i] - slider_pos
+            
+            # Calculate angle between platform center-to-leg vector and leg vector
+            angle = self.calculate_leg_platform_angle(platform_center, platform_points[i], leg_vector)
+            
+            if debug:
+                print(f"  Leg {i+1} angle constraint check:")
+                print(f"    Platform center: ({platform_center[0]:.3f}, {platform_center[1]:.3f}, {platform_center[2]:.3f})m")
+                print(f"    Platform attachment: ({platform_points[i][0]:.3f}, {platform_points[i][1]:.3f}, {platform_points[i][2]:.3f})m") 
+                print(f"    Slider position: ({slider_pos[0]:.3f}, {slider_pos[1]:.3f}, {slider_pos[2]:.3f})m")
+                print(f"    Leg vector: ({leg_vector[0]:.3f}, {leg_vector[1]:.3f}, {leg_vector[2]:.3f})m")
+                print(f"    Angle: {angle:.1f}° (max allowed: {self.max_leg_platform_angle:.1f}°)")
+                
+            if angle > self.max_leg_platform_angle:
+                if debug:
+                    print(f"    ⚠ WARNING: Angle constraint violated for leg {i+1}!")
+                constraints_satisfied = False
+            else:
+                if debug:
+                    print(f"    ✓ Angle constraint satisfied for leg {i+1}")
+                    
+        return constraints_satisfied
+
 def main():
     # Get the Excel file path from user input
     while True:
@@ -1509,9 +1630,7 @@ def main():
         else:
             print(f"Debug log file already exists: {log_file_path}")
     except Exception as e:
-        print(f"Failed to create debug log file: {e}")
-
-    # Get geometric parameters from user
+        print(f"Failed to create debug log file: {e}")    # Get geometric parameters from user
     while True:
         try:
             leg_length = float(input("Enter leg length in meters (default 0.3): ") or "0.3")
@@ -1532,7 +1651,7 @@ def main():
     
     # Ask if user wants to log optimization attempts
     log_attempts = input("Log optimization attempts? (y/N): ").lower().strip() == 'y'
-      # Create controller with specified parameters
+    # Create controller with specified parameters
     controller = PlatformController(leg_length, rail_max_travel, 0.0, log_file_path, log_attempts=log_attempts)
     
     # First process trajectory without optimization

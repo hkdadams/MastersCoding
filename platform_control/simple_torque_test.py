@@ -3,7 +3,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 # Create controller
-controller = PlatformController(0.5, 0.5, 'test.log')
+controller = PlatformController(0.5, 0.5, 0.0, 'test.log')
 
 # Test pose
 position = np.array([0.1, 0.0, 0.3])

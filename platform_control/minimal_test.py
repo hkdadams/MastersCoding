@@ -14,7 +14,7 @@ try:
     print("Scipy imported")
     
     # Create controller
-    controller = PlatformController(0.5, 0.5, 'test.log')
+    controller = PlatformController(0.5, 0.5, 0.0, 'test.log')
     print("Controller created")
     
     # Simple calculation

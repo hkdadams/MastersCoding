@@ -207,12 +207,11 @@ def optimize_with_initial_guess(x0: np.ndarray, bounds: List[Tuple[float, float]
             'error': str(e),
             'x': x0,
             'fun': float('inf'),
-            'is_feasible': False,
-            'feasible_score': None
+            'is_feasible': False,        'feasible_score': None
         }
 
 class PlatformController:
-    def __init__(self, leg_length: float, rail_max_travel: float, slider_min_travel_offset: float, log_file_path: str, log_attempts: bool = True):
+    def __init__(self, leg_length: float, rail_max_travel: float, slider_min_travel_offset: float, log_file_path: str, platform_side: float = None, platform_radius: float = None, log_attempts: bool = True):
         """
         Initialize the platform controller with geometric parameters
         
@@ -221,21 +220,36 @@ class PlatformController:
             rail_max_travel: Maximum travel distance of each slider in meters
             slider_min_travel_offset: Minimum travel offset for sliders
             log_file_path: Path to the debug log file
+            platform_side: Side length of the triangular platform in meters (optional)
+            platform_radius: Radius of the triangular platform in meters (optional)
             log_attempts: Whether to log individual optimization attempts (default: True)
+            
+        Note:
+            You must specify exactly one of platform_side OR platform_radius.
+            If neither is specified, defaults to platform_side = 0.2m
         """
         self.leg_length = leg_length
         self.rail_max_travel = rail_max_travel  # This is the effective travel length
         self.slider_min_travel_offset = slider_min_travel_offset # This is the absolute start coordinate of the travel
         self.L_squared = leg_length**2
-        self.log_attempts = log_attempts
-        
-        # Add offset parameters
+        self.log_attempts = log_attempts        # Add offset parameters
         self.position_offset = np.zeros(3)  # [x, y, z] offsets
         self.rotation_offset = np.zeros(3)  # [roll, pitch, yaw] offsets in degrees
-        
-        # Platform geometry (from original implementation)
-        self.PLATFORM_SIDE = 0.2
-        self.PLATFORM_RADIUS = self.PLATFORM_SIDE / math.sqrt(3)
+          # Platform geometry (configurable) - accept either side length or radius
+        if platform_side is not None and platform_radius is not None:
+            raise ValueError("Cannot specify both platform_side and platform_radius. Choose one.")
+        elif platform_side is not None:
+            # Calculate radius from side length
+            self.PLATFORM_SIDE = platform_side
+            self.PLATFORM_RADIUS = self.PLATFORM_SIDE / math.sqrt(3)
+        elif platform_radius is not None:
+            # Calculate side length from radius
+            self.PLATFORM_RADIUS = platform_radius
+            self.PLATFORM_SIDE = self.PLATFORM_RADIUS * math.sqrt(3)
+        else:
+            # Default: side length = 0.44445926m
+            self.PLATFORM_SIDE = 0.44445926
+            self.PLATFORM_RADIUS = self.PLATFORM_SIDE / math.sqrt(3)
         
         # Define rail vectors (120° apart)
         self.rail_vectors = [
@@ -1518,9 +1532,8 @@ def main():
     
     # Ask if user wants to log optimization attempts
     log_attempts = input("Log optimization attempts? (y/N): ").lower().strip() == 'y'
-    
-    # Create controller with specified parameters
-    controller = PlatformController(leg_length, rail_max_travel, log_file_path, log_attempts=log_attempts)
+      # Create controller with specified parameters
+    controller = PlatformController(leg_length, rail_max_travel, 0.0, log_file_path, log_attempts=log_attempts)
     
     # First process trajectory without optimization
     print("\nProcessing trajectory without optimization...")

@@ -79,8 +79,7 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
             
             successful_files = [d for d in summary_data if d['status'] == 'Success']
             failed_files = [d for d in summary_data if d['status'] == 'Failed']
-            
-            # Sort by velocity improvement for ranking
+              # Sort by velocity improvement for ranking
             successful_files.sort(key=lambda x: x.get('velocity_improvement_percent', 0), reverse=True)
             
             debug_file.write("Successful Files (Ranked by Velocity Improvement):\n")
@@ -89,8 +88,7 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
                 debug_file.write(f"{i:2d}. {file_data['file_name']}\n")
                 debug_file.write(f"    Velocity Reduction: {file_data.get('velocity_improvement_percent', 0):.2f}%\n")
                 debug_file.write(f"    Acceleration Reduction: {file_data.get('acceleration_improvement_percent', 0):.2f}%\n")
-                debug_file.write(f"    Peak Torque (Slider 1): {file_data.get('peak_torque_slider1_Nm', 0):.2f} Nm\n")
-                debug_file.write(f"    Processing Time: {file_data.get('processing_time_seconds', 0):.1f}s\n")                
+                debug_file.write(f"    Processing Time: {file_data.get('processing_time_seconds', 0):.1f}s\n")
                 if file_data.get('slider_limits_hit', False):
                     debug_file.write(f"    WARNING - Slider Violations: {file_data.get('violated_sliders', '')}\n")
                 debug_file.write("\n")
@@ -116,15 +114,6 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
                     debug_file.write(f"Median Processing Time: {np.median(processing_times):.1f} seconds\n")
                     debug_file.write(f"Fastest File: {min(processing_times):.1f} seconds\n")
                     debug_file.write(f"Slowest File: {max(processing_times):.1f} seconds\n\n")
-                
-                # Torque analysis
-                torques = [d.get('peak_torque_slider1_Nm', 0) for d in successful_files if not np.isnan(d.get('peak_torque_slider1_Nm', np.nan))]
-                if torques:
-                    debug_file.write("Peak Torque Statistics (Slider 1):\n")
-                    debug_file.write(f"Mean Peak Torque: {np.mean(torques):.2f} Nm\n")
-                    debug_file.write(f"Median Peak Torque: {np.median(torques):.2f} Nm\n")
-                    debug_file.write(f"Maximum Peak Torque: {max(torques):.2f} Nm\n")
-                    debug_file.write(f"Minimum Peak Torque: {min(torques):.2f} Nm\n\n")
             
             debug_file.write("=" * 50 + "\n")
             debug_file.write(f"Analysis completed at: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -146,7 +135,7 @@ def create_batch_debug_files(summary_data, vel_stats, acc_stats, files_with_slid
 
 def process_file(args):
     """Process a single Excel file with pre-processed position and orientation data"""
-    file_path, leg_length, rail_max_travel, slider_base_position, enable_logging = args
+    file_path, leg_length, rail_max_travel, slider_base_position, platform_side, platform_radius, enable_logging = args
     error_details = {}
     start_time = pd.Timestamp.now()
     df = None
@@ -181,11 +170,11 @@ def process_file(args):
             'Yaw(deg)': 'yaw'
         }
         trajectory_df = df.rename(columns=column_map)
-        
-        # Convert time from milliseconds to seconds
+          # Convert time from milliseconds to seconds
         trajectory_df['time'] = trajectory_df['time'] / 1000.0
-          # Create controller and process
-        controller = PlatformController(leg_length, rail_max_travel, slider_base_position, log_file_path, log_attempts=enable_logging)
+        
+        # Create controller and process
+        controller = PlatformController(leg_length, rail_max_travel, slider_base_position, log_file_path, platform_side=platform_side, platform_radius=platform_radius, log_attempts=enable_logging)
         
         # Process without optimization first
         results_df_no_opt = controller.process_trajectory(
@@ -220,11 +209,9 @@ def process_file(args):
         )
         
         if results_df is None:
-            raise ValueError("Failed to process optimized trajectory")
-          # Calculate improvements
+            raise ValueError("Failed to process optimized trajectory")          # Calculate improvements
         peak_velocities = max(max(abs(v)) for v in results_df['velocities'])
         peak_accelerations = max(max(abs(a)) for a in results_df['accelerations'])
-        peak_torque_slider1 = results_df['Motor Torque Slider 1 (Nm)'].abs().max() # Added
         
         vel_improvement = (peak_velocities_no_opt - peak_velocities) / peak_velocities_no_opt * 100
         acc_improvement = (peak_accelerations_no_opt - peak_accelerations) / peak_accelerations_no_opt * 100
@@ -261,7 +248,6 @@ def process_file(args):
         print(f"Processing complete in {processing_time:.1f} seconds")
         print(f"Velocity reduction: {vel_improvement:.1f}%")
         print(f"Acceleration reduction: {acc_improvement:.1f}%")
-        print(f"Peak Torque Slider 1 (Optimized): {peak_torque_slider1:.2f} Nm") # Added
         
         if slider_limits_hit:
             print(f"⚠ SLIDER LIMIT VIOLATIONS: {', '.join(violated_sliders)}")
@@ -272,7 +258,6 @@ def process_file(args):
         
         # Return comprehensive results
         return True, file_path, None, {
-            'peak_torque_slider1': peak_torque_slider1,
             'vel_improvement': vel_improvement,
             'acc_improvement': acc_improvement,
             'peak_velocities_no_opt': peak_velocities_no_opt,
@@ -281,8 +266,7 @@ def process_file(args):
             'peak_accelerations_opt': peak_accelerations,
             'slider_limits_hit': slider_limits_hit,
             'violated_sliders': violated_sliders,
-            'slider_limit_details': slider_limit_details,
-            'processing_time': processing_time
+            'slider_limit_details': slider_limit_details,            'processing_time': processing_time
         }
         
     except Exception as e:
@@ -297,13 +281,11 @@ def process_file(args):
                 error_log.write(f"Time: {pd.Timestamp.now()}\n")
                 error_log.write(f"Duration: {(pd.Timestamp.now() - start_time).total_seconds():.1f}s\n")
                 error_log.write(f"Error: {str(e)}\n")
-                error_log.write(f"Optimized Peak Torque Slider 1: N/A due to error\n") # Added
                 error_log.write(f"{'='*50}\n")
         except Exception as log_error:
             print(f"Failed to write to error log: {str(log_error)}")
             
         return False, file_path, error_details, {
-            'peak_torque_slider1': np.nan,
             'vel_improvement': np.nan,
             'acc_improvement': np.nan,
             'peak_velocities_no_opt': np.nan,
@@ -373,13 +355,50 @@ def main():
     # Check for existing output files first
     if not check_existing_outputs(file_paths):
         return
-      # Get geometric parameters
+    
+    # Get geometric parameters
     print(f"\n{'='*60}")
     print("PLATFORM CONFIGURATION")
     print(f"{'='*60}")
     
-    leg_length = float(input("\nEnter leg length in meters (default 0.3): ") or "0.3")
-    rail_max_travel = float(input("Enter maximum rail travel distance in meters (default 0.5): ") or "0.5")
+    leg_length = float(input("\nEnter leg length in meters (default 0.5): ") or "0.5")
+    rail_max_travel = float(input("Enter maximum rail travel distance in meters (default 1.0): ") or "1.0")
+    
+    # Platform size configuration
+    print(f"\n{'-'*50}")
+    print("PLATFORM SIZE CONFIGURATION")
+    print(f"{'-'*50}")
+    print("You can specify the platform size using either:")
+    print("  1. Side length (length of each edge of the triangular platform)")
+    print("  2. Radius (distance from center to leg attachment points)")
+    print("")
+    print("Choose your preferred input method:")
+    print("  [1] Side length (default)")
+    print("  [2] Radius")
+    
+    choice = input("\nEnter choice (1 or 2, default 1): ").strip() or "1"
+    
+    platform_side = None
+    platform_radius = None
+    
+    if choice == "2":
+        print("\nPlatform radius examples:")
+        print("  • 0.2565m: Default radius (side ≈ 0.44445926m)")
+        print("  • 0.173m: Smaller radius (side ≈ 0.3m)")
+        print("  • 0.346m: Larger radius (side ≈ 0.6m)")
+        
+        platform_radius = float(input(f"\nEnter platform radius in meters (default 0.2565): ") or "0.2565")
+        platform_side_calc = platform_radius * (3**0.5)  # Calculate side for display
+        print(f"✓ Platform side length will be: {platform_side_calc:.3f}m")
+    else:
+        print("\nPlatform side length examples:")
+        print("  • 0.44445926m: Default side length (radius ≈ 0.256m)")
+        print("  • 0.3m: Smaller platform (radius ≈ 0.173m)")
+        print("  • 0.6m: Larger platform (radius ≈ 0.346m)")
+        
+        platform_side = float(input(f"\nEnter platform side length in meters (default 0.44445926): ") or "0.44445926")
+        platform_radius_calc = platform_side / (3**0.5)  # Calculate radius for display
+        print(f"✓ Platform radius will be: {platform_radius_calc:.3f}m")
     
     # Improved slider position offset explanation
     print(f"\n{'-'*50}")
@@ -392,19 +411,20 @@ def main():
     print("  • 0.1m: Sliders operate from 0.1m to (0.1m + rail_travel)")
     print("  • -0.05m: Sliders operate from -0.05m to (-0.05m + rail_travel)")
     
-    slider_base_position = float(input(f"\nEnter slider base position in meters (default 0.0): ") or "0.0")
+    slider_base_position = float(input(f"\nEnter slider base position in meters (default 0.25406848): ") or "0.25406848")
     
     # Show the calculated operating range
     slider_min_limit = slider_base_position
     slider_max_limit = slider_base_position + rail_max_travel
     print(f"\n✓ Sliders will operate in range: {slider_min_limit:.3f}m to {slider_max_limit:.3f}m")
-    
-    # Add logging option
+      # Add logging option
     print(f"\n{'-'*50}")
     print("LOGGING OPTIONS")
     print(f"{'-'*50}")
-    enable_logging = input("Enable detailed optimization logging? (y/N): ").lower().startswith('y')    # Create arguments for each file
-    process_args = [(f, leg_length, rail_max_travel, slider_base_position, enable_logging) for f in file_paths]
+    enable_logging = input("Enable detailed optimization logging? (y/N): ").lower().startswith('y')
+    
+    # Create arguments for each file
+    process_args = [(f, leg_length, rail_max_travel, slider_base_position, platform_side, platform_radius, enable_logging) for f in file_paths]
     
     print(f"\nProcessing {len(file_paths)} files sequentially...")
     start_time = pd.Timestamp.now()
@@ -443,10 +463,9 @@ def main():
                     files_with_slider_violations.append({
                         'file_name': file_name,
                         'violated_sliders': violated_sliders,
-                        'details': metrics['slider_limit_details']
-                    })
+                        'details': metrics['slider_limit_details']                    })
                 
-                summary_data.append({ # Added
+                summary_data.append({
                     'file_name': file_name,
                     'status': 'Success',
                     'velocity_improvement_percent': vel_improvement,
@@ -455,15 +474,14 @@ def main():
                     'peak_acceleration_no_opt_ms2': metrics['peak_accelerations_no_opt'],
                     'peak_velocity_opt_ms': metrics['peak_velocities_opt'],
                     'peak_acceleration_opt_ms2': metrics['peak_accelerations_opt'],
-                    'peak_torque_slider1_Nm': metrics['peak_torque_slider1'],
                     'slider_limits_hit': slider_limits_hit,
                     'violated_sliders': ', '.join(violated_sliders) if violated_sliders else '',
-                    'processing_time_seconds': metrics['processing_time']
-                })
+                    'processing_time_seconds': metrics['processing_time']                })
             else:
                 failed += 1
                 failed_files.append((file_path, error_details))
-                summary_data.append({ # Added
+                
+                summary_data.append({
                     'file_name': file_name,
                     'status': 'Failed',
                     'velocity_improvement_percent': np.nan,
@@ -472,9 +490,9 @@ def main():
                     'peak_acceleration_no_opt_ms2': np.nan,
                     'peak_velocity_opt_ms': np.nan,
                     'peak_acceleration_opt_ms2': np.nan,
-                    'peak_torque_slider1_Nm': np.nan,
                     'slider_limits_hit': False,
-                    'violated_sliders': '',                    'processing_time_seconds': metrics['processing_time'] if 'processing_time' in metrics else np.nan
+                    'violated_sliders': '',
+                    'processing_time_seconds': metrics['processing_time'] if 'processing_time' in metrics else np.nan
                 })
                 print(f"\nError processing {file_name}:")
                 for error_type, error_msg in error_details.items():
@@ -501,46 +519,59 @@ def main():
         acc_stats = None
         output_dir = os.path.join(dir_path, "platform_outputs")
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Calculate and display improvement statistics
+          # Calculate and display improvement statistics
         if velocity_improvements and acceleration_improvements:
             print(f"\n{'='*60}")
             print("IMPROVEMENT STATISTICS")
             print(f"{'='*60}")
+              # Filter out negative percentage reductions (only include feasible improvements)
+            feasible_velocity_improvements = [v for v in velocity_improvements if v > 0]
+            feasible_acceleration_improvements = [a for a in acceleration_improvements if a > 0]
             
-            # Velocity improvement statistics
-            vel_stats = {
-                'mean': np.mean(velocity_improvements),
-                'median': np.median(velocity_improvements),
-                'std': np.std(velocity_improvements),
-                'min': np.min(velocity_improvements),
-                'max': np.max(velocity_improvements)
-            }
-            
-            print(f"\nVelocity Reduction Statistics:")
-            print(f"  Mean:     {vel_stats['mean']:.2f}%")
-            print(f"  Median:   {vel_stats['median']:.2f}%")
-            print(f"  Std Dev:  {vel_stats['std']:.2f}%")
-            print(f"  Min:      {vel_stats['min']:.2f}%")
-            print(f"  Max:      {vel_stats['max']:.2f}%")
-            
-            # Acceleration improvement statistics
-            acc_stats = {
-                'mean': np.mean(acceleration_improvements),
-                'median': np.median(acceleration_improvements),
-                'std': np.std(acceleration_improvements),
-                'min': np.min(acceleration_improvements),
-                'max': np.max(acceleration_improvements)
-            }
-            
-            print(f"\nAcceleration Reduction Statistics:")
-            print(f"  Mean:     {acc_stats['mean']:.2f}%")
-            print(f"  Median:   {acc_stats['median']:.2f}%")
-            print(f"  Std Dev:  {acc_stats['std']:.2f}%")
-            print(f"  Min:      {acc_stats['min']:.2f}%")
-            print(f"  Max:      {acc_stats['max']:.2f}%")
-            
-            # Slider limit violation statistics            print(f"\n{'='*60}")
+            print(f"\nFiltered {len(velocity_improvements) - len(feasible_velocity_improvements)} infeasible velocity improvements")
+            print(f"Filtered {len(acceleration_improvements) - len(feasible_acceleration_improvements)} infeasible acceleration improvements")
+              # Velocity improvement statistics (feasible improvements only)
+            if feasible_velocity_improvements:
+                vel_stats = {
+                    'mean': np.mean(feasible_velocity_improvements),
+                    'median': np.median(feasible_velocity_improvements),
+                    'std': np.std(feasible_velocity_improvements),
+                    'min': np.min(feasible_velocity_improvements),
+                    'max': np.max(feasible_velocity_improvements)
+                }
+                
+                print(f"\nVelocity Reduction Statistics (Feasible Improvements Only):")
+                print(f"  Count:    {len(feasible_velocity_improvements)} out of {len(velocity_improvements)} files")
+                print(f"  Mean:     {vel_stats['mean']:.2f}%")
+                print(f"  Median:   {vel_stats['median']:.2f}%")
+                print(f"  Std Dev:  {vel_stats['std']:.2f}%")
+                print(f"  Min:      {vel_stats['min']:.2f}%")
+                print(f"  Max:      {vel_stats['max']:.2f}%")
+            else:
+                vel_stats = None
+                print(f"\nVelocity Reduction Statistics: No feasible improvements found")
+              # Acceleration improvement statistics (feasible improvements only)
+            if feasible_acceleration_improvements:
+                acc_stats = {
+                    'mean': np.mean(feasible_acceleration_improvements),
+                    'median': np.median(feasible_acceleration_improvements),
+                    'std': np.std(feasible_acceleration_improvements),
+                    'min': np.min(feasible_acceleration_improvements),
+                    'max': np.max(feasible_acceleration_improvements)
+                }
+                
+                print(f"\nAcceleration Reduction Statistics (Feasible Improvements Only):")
+                print(f"  Count:    {len(feasible_acceleration_improvements)} out of {len(acceleration_improvements)} files")
+                print(f"  Mean:     {acc_stats['mean']:.2f}%")
+                print(f"  Median:   {acc_stats['median']:.2f}%")
+                print(f"  Std Dev:  {acc_stats['std']:.2f}%")
+                print(f"  Min:      {acc_stats['min']:.2f}%")
+                print(f"  Max:      {acc_stats['max']:.2f}%")
+            else:
+                acc_stats = None
+                print(f"\nAcceleration Reduction Statistics: No feasible improvements found")
+              # Slider limit violation statistics
+            print(f"\n{'='*60}")
             print("SLIDER LIMIT VIOLATION ANALYSIS")
             print(f"{'='*60}")
             
@@ -582,36 +613,65 @@ def main():
                 with pd.ExcelWriter(summary_excel_path, engine='openpyxl') as writer:
                     # Main summary sheet
                     summary_df.to_excel(writer, index=False, sheet_name="File_Results")
-                    
-                    # Statistics summary sheet
+                      # Statistics summary sheet
                     if velocity_improvements and acceleration_improvements:
                         stats_data = []
+                          # Velocity stats (only if feasible improvements exist)
+                        if vel_stats is not None:
+                            vel_stats_row = {
+                                'Metric': 'Velocity Reduction (% - Feasible Only)',
+                                'Count': len([v for v in velocity_improvements if v > 0]),
+                                'Total_Files': len(velocity_improvements),
+                                'Mean': vel_stats['mean'],
+                                'Median': vel_stats['median'],
+                                'Std_Dev': vel_stats['std'],
+                                'Min': vel_stats['min'],
+                                'Max': vel_stats['max']
+                            }
+                            stats_data.append(vel_stats_row)
+                        else:
+                            vel_stats_row = {
+                                'Metric': 'Velocity Reduction (% - Feasible Only)',
+                                'Count': 0,
+                                'Total_Files': len(velocity_improvements),
+                                'Mean': 'No feasible improvements',
+                                'Median': 'No feasible improvements',
+                                'Std_Dev': 'No feasible improvements',
+                                'Min': 'No feasible improvements',
+                                'Max': 'No feasible improvements'
+                            }
+                            stats_data.append(vel_stats_row)
                         
-                        # Velocity stats
-                        vel_stats_row = {
-                            'Metric': 'Velocity Reduction (%)',
-                            'Mean': vel_stats['mean'],
-                            'Median': vel_stats['median'],
-                            'Std_Dev': vel_stats['std'],
-                            'Min': vel_stats['min'],
-                            'Max': vel_stats['max']
-                        }
-                        stats_data.append(vel_stats_row)
-                        
-                        # Acceleration stats
-                        acc_stats_row = {
-                            'Metric': 'Acceleration Reduction (%)',
-                            'Mean': acc_stats['mean'],
-                            'Median': acc_stats['median'],
-                            'Std_Dev': acc_stats['std'],
-                            'Min': acc_stats['min'],
-                            'Max': acc_stats['max']
-                        }
-                        stats_data.append(acc_stats_row)
+                        # Acceleration stats (only if feasible improvements exist)
+                        if acc_stats is not None:
+                            acc_stats_row = {
+                                'Metric': 'Acceleration Reduction (% - Feasible Only)',
+                                'Count': len([a for a in acceleration_improvements if a > 0]),
+                                'Total_Files': len(acceleration_improvements),
+                                'Mean': acc_stats['mean'],
+                                'Median': acc_stats['median'],
+                                'Std_Dev': acc_stats['std'],
+                                'Min': acc_stats['min'],
+                                'Max': acc_stats['max']
+                            }
+                            stats_data.append(acc_stats_row)
+                        else:
+                            acc_stats_row = {
+                                'Metric': 'Acceleration Reduction (% - Feasible Only)',
+                                'Count': 0,
+                                'Total_Files': len(acceleration_improvements),
+                                'Mean': 'No feasible improvements',
+                                'Median': 'No feasible improvements',
+                                'Std_Dev': 'No feasible improvements',
+                                'Min': 'No feasible improvements',
+                                'Max': 'No feasible improvements'
+                            }
+                            stats_data.append(acc_stats_row)
                         
                         stats_df = pd.DataFrame(stats_data)
                         stats_df.to_excel(writer, index=False, sheet_name="Statistics")
-                          # Slider violations sheet
+                        
+                        # Slider violations sheet
                         if files_with_slider_violations:
                             violation_data = []
                             for violation in files_with_slider_violations:
@@ -623,13 +683,13 @@ def main():
                             violation_df = pd.DataFrame(violation_data)
                             violation_df.to_excel(writer, index=False, sheet_name="Slider_Violations")
                     
-                print(f"\nBatch processing summary saved to: {summary_excel_path}") # Added
-            except Exception as e: # Added
-                print(f"\nError saving summary Excel: {e}") # Added
-          # Create comprehensive debug files (moved to end of summary section)
+                print(f"\nBatch processing summary saved to: {summary_excel_path}")
+            except Exception as e:
+                print(f"\nError saving summary Excel: {e}")
+        
+        # Create comprehensive debug files (moved to end of summary section)
 
-        # Print summary
-        print(f"\n{'='*60}")
+        # Print summary        print(f"\n{'='*60}")
         print("BATCH PROCESSING SUMMARY")
         print(f"{'='*60}")
         print(f"Total processing time: {total_time/60:.1f} minutes")
@@ -642,7 +702,8 @@ def main():
                 print(f"\n{os.path.basename(file_path)}:")
                 for error_type, error_msg in error_details.items():
                     print(f"  {error_type}: {error_msg}")
-              # Point to the error log
+            
+            # Point to the error log
             output_dir = os.path.join(os.path.dirname(file_paths[0]), "platform_outputs")
             print(f"\nDetailed error logs have been written to: {os.path.join(output_dir, 'processing_errors.log')}")
 
